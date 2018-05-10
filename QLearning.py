@@ -6,10 +6,100 @@
 import sys
 import pygame
 import numpy as np
+from search import *
 from math import sqrt, exp
 from random import randint
 from pygame.locals import *
-from qlearning import QLearning
+from collections import defaultdict
+
+class QLearning():
+
+    def __init__(self, A, Ne, Rplus, alpha=(lambda n: 1./(1+n)), gamma=0.9):
+        """Q-Learning for reinforcement learning"""
+
+        # Ne        Number of time needed before considering a state as known
+        # Rplus     explorating reward estimated of unkown states
+        # alpha     learning factor
+        # gamma     reward factor
+        # Rplus     Reward used to initiate exploration
+        # Q         action values of state/action
+        # Nsa       frequencies of state/action pairs
+        # s         state
+        # a         action
+        # r         reward
+        # u         utility
+        # A         list of possible actions
+
+        self.gamma    = gamma
+        self.alpha    = alpha
+        self.Rplus    = Rplus
+        self.Ne       = Ne
+        self.A        = A
+
+        self.Q        = defaultdict(float)
+        self.Nsa      = defaultdict(float)
+        self.s        = None
+        self.a        = None
+
+
+    def f(self, u, n):
+        """ Exploration function. Returns fixed Rplus untill
+            agent has visited state, action a Ne number of times.
+            Same as ADP agent in book.
+
+            [in] u      : utility of the state = Q(s, a)
+            [in] n      : Number of time the state has been visited """
+
+        if n < self.Ne:
+            return self.Rplus
+        else:
+            return u
+
+    def reset(self):
+        """ Reset the different elements needed to allow the agent to run
+        correctly the next trial. """
+
+        self.s = None
+        self.a = None
+        self.r = None
+
+    def __call__(self, s, r):
+        """ Learn the Q(s,a) of the current state and return the next action
+            the agent must perform.
+
+            [in] s : state
+            [in] r : reward """
+
+        ns = s # next state
+
+        # Get reference for fancier notation
+        s = self.s
+        a = self.a
+        A = self.A
+
+        Q   = self.Q
+        Nsa = self.Nsa
+        alpha = self.alpha
+        gamma = self.gamma
+
+        # Check if the agent has already visited the previous state s
+        # and update Q matrix
+        if s is not None:
+            Nsa[s, a] += 1
+            Q[s, a]   += alpha(Nsa[s, a]) * \
+                           (r + gamma * max(Q[ns, na] for na in A) - \
+                            Q[s, a])
+
+        # Get the next action to perform
+        na = argmax(A, key=lambda na: self.f(Q[ns, na], Nsa[ns, na]))
+
+        # Save the next state and next action
+        self.s, self.a = ns, na
+
+        # Return new action
+        return na
+
+# ------------------------------------------------------------------------------
 
 VERBOSE = True
 
@@ -173,8 +263,8 @@ class Snake:
 
         return body_part
 
-    def newDir(self, dir):
-        self.dir = dir
+    def newDir(self, _dir):
+        self.dir = _dir
 
     def getPosition(self):
         return (self.body[0][0], self.body[0][1])
@@ -192,12 +282,12 @@ class Snake:
         self.body.append([last[0] + dir[0],
                           last[1] + dir[1]])
 
-    def draw(self, w):
+    def draw(self, _w):
         for b in self.body:
             if b == self.body[0]:
-                w.blit(self.snake_head, (b[0], b[1]))
+                _w.blit(self.snake_head, (b[0], b[1]))
             else:
-                w.blit(self.snake_body, (b[0], b[1]))
+                _w.blit(self.snake_body, (b[0], b[1]))
 
 class Fruit:
 
@@ -229,9 +319,8 @@ def getReward(snake, fruit):
     global pd
     global tr
 
-    # The rewards is proportional to the distance between the snake and the
-    # fruit
-
+    # The rewards is positif if the snake is nearer from the fruit and negatif
+    # if it is further from the fruit
     snake_pos = snake.getPosition()
     fruit_pos = fruit.getPosition()
 
@@ -242,11 +331,8 @@ def getReward(snake, fruit):
     # If new distance smaller than previous, positif reward
     if (pd - d) >= 0:
         r = MOVE_REWARD_POS
-        # r = sqrt(abs(WINDOW_WIDTH * SQUARE_SIZE)**2 + \
-        #         abs(WINDOW_LENGTH * SQUARE_SIZE)**2) - d
     else:
         r = MOVE_REWARD_NEG + tr
-        # r = -d + tr
 
     # Save distance
     pd = d
@@ -379,14 +465,14 @@ def run(agent, snake, fruit):
 if __name__ == "__main__":
 
     alpha_cst = (lambda n: 0.1)
-    alpha_decreasing = (lambda n: 60./(59.+n))
+    alpha_decreasing = (lambda n: 100./(99.+n))
 
     # Initate AI Agent, actions: "RIGHT" = 0 "LEFT" = 1 "STRAIGHT" = 2
-    q_learner = QLearning([0,1,2],
-                          Ne=0,
-                          Rplus=1000,
-                          alpha=alpha_cst,
-                          gamma=0.9)
+    q_learner = QLearning(A     = [0,1,2],
+                          Ne    = 0,
+                          Rplus = 1000,
+                          alpha = alpha_cst,
+                          gamma = 0.9)
 
     # init Pygame
     pygame.init()

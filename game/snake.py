@@ -101,8 +101,8 @@ class Snake:
 
         return True
 
-    def newDir(self, dir):
-        self.dir = dir
+    def newDir(self, _dir):
+        self.dir = _dir
 
     def getPosition(self):
         return (self.body[0][0], self.body[0][1])
@@ -120,9 +120,9 @@ class Snake:
         self.body.append([last[0] + dir[0],
                           last[1] + dir[1]])
 
-    def draw(self, w):
+    def draw(self, _w):
         for b in self.body:
-            w.blit(self.snake_img, (b[0], b[1]))
+            _w.blit(self.snake_img, (b[0], b[1]))
 
 class Fruit:
 
@@ -148,8 +148,8 @@ class Fruit:
     def getPosition(self):
         return (self.posx, self.posy)
 
-    def draw(self, w):
-        w.blit(self.fruit_img, (self.posx, self.posy))
+    def draw(self, _w):
+        _w.blit(self.fruit_img, (self.posx, self.posy))
 
 def run():
 
@@ -208,7 +208,6 @@ def run():
         # Update display on screen
         print "Refresh Screen"
         pygame.display.flip()
-
 
 if __name__ == "__main__":
 

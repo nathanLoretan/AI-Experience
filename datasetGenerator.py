@@ -34,14 +34,14 @@ def display(dataset, cat, isBlocking=False):
     plt.ylabel('x2', fontsize=16)
     plt.show(block=isBlocking)
 
-def classification(nbr_data, cat, disx, disy, filename="dataset",
+def classification(nbrData, cat, disx, disy, filename="dataset",
                    show=True):
 
     """Simple classification dataset uniformly distributedself. The dataset is
     saved in a pickle filed. The information saved are: Dataset generated,
     Categories used, min and max x values, min and max y values
 
-    [in]  nbr_data:int          number of data to generated for the dataset
+    [in]  nbrData:int           number of data to generated for the dataset
     [in]  cat:[c1, c2, ]        possible categories
     [in]  disx:[[min, max], ]   min and max x value for each cluster
     [in]  disy:[[min, max], ]   min and max y value for each cluster
@@ -49,10 +49,6 @@ def classification(nbr_data, cat, disx, disy, filename="dataset",
     [in]  show=True             Display a plot of the dataset
 
     [out] dataset::[[x, y, cat] ,...]"""
-
-    # cat = cathegory
-    # disx = distribution X
-    # disy = distribtuion y
 
     dataset = list()
 
@@ -66,7 +62,7 @@ def classification(nbr_data, cat, disx, disy, filename="dataset",
         high_x = disx[i][1]
         high_y = disy[i][1]
 
-        for y in range(int(nbr_data / nbr_cluster)):
+        for y in range(int(nbrData / nbr_cluster)):
             x = np.random.uniform(low=[low_x, low_y],
                                   high=[high_x, high_y],
                                   size=[2]).tolist()
@@ -91,29 +87,29 @@ def classification(nbr_data, cat, disx, disy, filename="dataset",
 
 if __name__ == "__main__":
 
-    # x = [[0.0, 0.5], [0.5, 1.0]]
-    # y = [[0.5, 1.0], [0.0, 0.5]]
-    # classification(300, [0, 1], x, y, 'classification2_1', False)
-    #
-    # x = [[0.0, 0.5], [0.5, 1.0]]
-    # y = [[0.0, 0.5], [0.5, 1.0]]
-    # classification(300, [0, 1], x, y, 'classification2_2', False)
-    #
-    # x = [[0.0, 0.5], [0.5, 1.0]]
-    # y = [[0.0, 0.5], [0.0, 0.5]]
-    # classification(300, [0, 1], x, y, 'classification2_3', False)
-    #
-    # x = [[0.5, 1.0], [0.5, 1.0]]
-    # y = [[0.0, 0.5], [0.5, 1.0]]
-    # classification(300, [0, 1], x, y, 'classification2_4', False)
-    #
-    # x = [[0.0, 0.5], [0.5, 1.0], [0.0, 0.5], [0.5, 1.0]]
-    # y = [[0.0, 0.5], [0.0, 0.5], [0.5, 1.0], [0.5, 1.0]]
-    # classification(300, [0, 1.0, 1.0, 0], x, y, 'xor_problem', False)
+    x = [[0.0, 0.5], [0.5, 1.0]]
+    y = [[0.5, 1.0], [0.0, 0.5]]
+    classification(300, [0, 1], x, y, 'classification2_1', False)
 
-    # x = [[0.0, 0.5], [0.5, 1.0], [0.0, 0.5], [0.5, 1.0]]
-    # y = [[0.0, 0.5], [0.0, 0.5], [0.5, 1.0], [0.5, 1.0]]
-    # classification(300, [[0,0], [1,0], [0,1], [1,1]], x, y, 'classification4')
+    x = [[0.0, 0.5], [0.5, 1.0]]
+    y = [[0.0, 0.5], [0.5, 1.0]]
+    classification(300, [0, 1], x, y, 'classification2_2', False)
+
+    x = [[0.0, 0.5], [0.5, 1.0]]
+    y = [[0.0, 0.5], [0.0, 0.5]]
+    classification(300, [0, 1], x, y, 'classification2_3', False)
+
+    x = [[0.5, 1.0], [0.5, 1.0]]
+    y = [[0.0, 0.5], [0.5, 1.0]]
+    classification(300, [0, 1], x, y, 'classification2_4', False)
+
+    x = [[0.0, 0.5], [0.5, 1.0], [0.0, 0.5], [0.5, 1.0]]
+    y = [[0.0, 0.5], [0.0, 0.5], [0.5, 1.0], [0.5, 1.0]]
+    classification(300, [0, 1.0, 1.0, 0], x, y, 'xor_problem', False)
+
+    x = [[0.0, 0.5], [0.5, 1.0], [0.0, 0.5], [0.5, 1.0]]
+    y = [[0.0, 0.5], [0.0, 0.5], [0.5, 1.0], [0.5, 1.0]]
+    classification(300, [[0,0], [1,0], [0,1], [1,1]], x, y, 'classification4')
 
     x = [[0.0, 1.0],  [0.0,  1.0], [0.0,  0.25], [0.75, 1.0],  [0.25, 0.75]]
     y = [[0.0, 0.25], [0.75, 1.0], [0.25, 0.75], [0.25, 0.75], [0.25, 0.75]]
