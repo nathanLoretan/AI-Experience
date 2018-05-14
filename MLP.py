@@ -7,7 +7,7 @@ import pickle
 from math import *
 import numpy as np
 import matplotlib.pyplot as plt
-from generate_dataset import display, colorlist, markerlist
+from datasetGenerator import display, colorlist, markerlist
 
 class Perceptron:
     """Perceptron Neurone"""
@@ -25,7 +25,6 @@ class Perceptron:
     # phiw = value used for backpropagation of the weight
     # phib = value used for backpropagation of the bias
 
-    # General attributes
     b = 0
     y = 0
 
@@ -115,7 +114,6 @@ class MLP:
     # y = ouput
     # t = training dataset
     # layers = [nbr of nodes of layer 1, nbr of nodes of layer 2, ...]
-    # t = training result
 
     # Constructor
     def __init__(self, nbrIn, layers, gamma=0.5, alpha=0.4):
@@ -148,22 +146,7 @@ class MLP:
 
     def train(self, x, t):
 
-        for l in range(len(self.layers)):
-
-            # Number of neurones in the layer
-            lLen = len(self.layers[l])
-
-            # Layer's input value
-            if l == 0:
-                lIn = x
-            else:
-                lIn = lOut
-
-            # Layer's output value
-            lOut = np.zeros(lLen)
-
-            for n in range(lLen):
-                lOut[n] = self.layers[l][n].run(lIn)
+        self.run(x)
 
         # Training
         for l in range(len(self.layers)-1, -1, -1):
@@ -195,6 +178,8 @@ class MLP:
 
                     self.layers[l][n].backpropagation(np.sum(phiw), \
                                                       np.sum(phib))
+
+        return self.y
 
     def run(self, x):
 
