@@ -597,6 +597,8 @@ if __name__ == "__main__":
     # FC      -> (nbrIn, alpha)
     # Softmax -> ()
 
+    # (w - f + 2 * p) / s + 1 = number of neurones along each row
+
     l = [
             ("Conv",     (8, (28,28), (5,5), (0,0), (1,1), 0.000001)),
             ("ReLu",     ()),

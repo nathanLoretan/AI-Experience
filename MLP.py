@@ -12,27 +12,32 @@ from datasetGenerator import display, colorlist, markerlist
 class Perceptron:
     """Perceptron Neurone"""
 
-    # x = input
-    # y = adder output
-    # out = output
-    # w = weights
-    # t = training data
-    # b = bias
+    # x     = input
+    # z     = adder output
+    # y     = output
+    # w     = weights
+    # t     = training data
+    # b     = bias
     # gamma = smoothing factor
     # alpha = learning factor
-    # dw = delta weight
-    # db = delta bias
-    # phiw = value used for backpropagation of the weight
-    # phib = value used for backpropagation of the bias
+    # dw    = delta weight
+    # db    = delta bias
+    # dnw   = delta node weight for backpropagation
+    # dnb   = delta node bias for backpropagation
 
     b = 0
     y = 0
 
+    # phiw = 0
+    # phib = 0
+    # phiw  = value used for backpropagation of the weight
+    # phib  = value used for backpropagation of the bias
+
     dw = 0
     db = 0
 
-    phiw = 0
-    phib = 0
+    dnw = 0
+    dnb = 0
 
     # Constructor
     def __init__(self, nbrIn, gamma=0.5, alpha=0.4):
@@ -47,52 +52,71 @@ class Perceptron:
     def activation(self, y):
         return (1.0 / (1.0 + exp(-y))) # Sigmoid
 
-    def phi(self, y, t):
-        return y * (t - y) * (1.0 - y)
+    def backpropagation(self, dn, w):
 
-    def phi_bk(self, y, t):
-        return y * t * (1.0 - y)
+        gamma = self.gamma
+        alpha = self.alpha
 
-    def delta(self, phi, gamma, x, dw):
+        # Error probagate from layer +1 and using Sigmoid as activation
+        # function
+        #
+        # dE/dw   = dE/dy * dy/dz * dz/dw
+        # dE/dy   = sum{i, dE/dz+1i * dz+1i/dy} where i = ith node of layer +1
+        # dE/dz+1 = dE/dy+1i * dy+1i/dz+1i = dn+1i
+        # dz+1/dy = w+1i
+        # dy/dz   = y * (1 - y)
+        # dz/dw   = x
+        #
+        # Delta node:
+        # dn = dE/dy * dy/dz = sum{i, dE/dz+1i * dz+1i/dy} * y * (1 - y)
 
-        # Use the derivate of square loss error and smoothing weight adjustement
-        return np.add(gamma * dw, np.multiply(x, (1.0 - gamma) * phi))
+        # Calculate the delta node used in backpropagation
+        self.dn = self.y * (1.0 - self.y) * np.sum(dn * w)
 
-    def delta_bk(self, phi, gamma, x, dw):
-        # Delta calculated with backpropagation data
+        # Calculate dw and db using smoothing factor
+        # dw = gamma * dw + (1 - gamma) * dn * x
+        self.db = gamma * self.db + (1.0 - gamma) * self.dn
+        self.dw = np.add(gamma * self.dw,\
+                         np.multiply((1.0 - gamma) * self.dn, self.x))
 
-        # Use the derivate of square loss error and smoothing weight adjustement
-        return np.add(gamma * dw, np.multiply(x, (1.0 - gamma) * phi))
-
-    def backpropagation(self, phiw, phib):
-
-        self.phiw = self.phi_bk(self.y, phiw)
-        self.phib = self.phi_bk(self.y, phib)
-
-        self.dw = self.delta_bk(self.phiw, self.gamma, self.x, self.dw)
-        self.db = self.delta_bk(self.phib, self.gamma, 1,      self.db)
-
-        # wNew = wOld + alpha * dw * x
+        # wNew = wOld + alpha * dw
         self.w = self.w + self.alpha * self.dw
 
-        # bNew = bOld + alpha * db * 1
+        # bNew = bOld + a * db
         self.b = self.b + self.alpha * self.db
 
     def train(self, t):
 
         if t != self.y:
 
-            self.phiw = self.phi(self.y, t)
-            self.phib = self.phi(self.y, t)
+            gamma = self.gamma
+            alpha = self.alpha
 
-            self.dw = self.delta(self.phiw, self.gamma, self.x, self.dw)
-            self.db = self.delta(self.phib, self.gamma, 1,      self.db)
+            # Squared Error is used to train the neural network and using
+            # sigmoid as activation function
+            #
+            # dE/dw = dE/dy * dy/dz * dz/dw
+            # dE/dy = (t - y)
+            # dy/dz = y * (1 - y)
+            # dz/dw = x
+            #
+            # Delta node:
+            # dn = dE/dy * dy/dz = (t - y) * y * (1 - y)
 
-            # wNew = wOld + alpha * dw * x
-            self.w = self.w + self.alpha * self.dw
+            # Calculate the delta node used in backpropagation
+            self.dn = self.y * (1.0 - self.y) * (t   - self.y)
 
-            # bNew = bOld + a * db * 1
-            self.b = self.b + self.alpha * self.db
+            # Calculate dw and db using smoothing factor
+            # dw = gamma * dw + (1 - gamma) * dn * x
+            self.db = gamma * self.db + (1.0 - gamma) * self.dn
+            self.dw = np.add(gamma * self.dw,\
+                             np.multiply((1.0 - gamma) * self.dn, self.x))
+
+            # wNew = wOld + alpha * dw
+            self.w = self.w + alpha * self.dw
+
+            # bNew = bOld + a * db
+            self.b = self.b + alpha * self.db
 
     def run(self, x):
 
@@ -166,18 +190,16 @@ class MLP:
                     pLen = len(self.layers[l+1])
 
                     # Create/reset the lists
-                    phiw = np.zeros(pLen)
-                    phib = np.zeros(pLen)
+                    w  = np.zeros(pLen)
+                    dn = np.zeros(pLen)
 
                     # nn = node of next layer
                     for nn in range(pLen):
 
-                        w = self.layers[l+1][nn].w[n]
-                        phiw[nn] = w * self.layers[l+1][nn].phiw
-                        phib[nn] = w * self.layers[l+1][nn].phib
+                        w[nn]  = self.layers[l+1][nn].w[n]
+                        dn[nn] = self.layers[l+1][nn].dn
 
-                    self.layers[l][n].backpropagation(np.sum(phiw), \
-                                                      np.sum(phib))
+                        self.layers[l][n].backpropagation(dn, w)
 
         return self.y
 

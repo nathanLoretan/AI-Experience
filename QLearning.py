@@ -326,7 +326,7 @@ def getReward(snake, fruit):
 
     # Calcul the distance between fruit and snake
     d = sqrt(abs(snake_pos[0] - fruit_pos[0])**2 +\
-                 abs(snake_pos[1] - fruit_pos[1])**2)
+             abs(snake_pos[1] - fruit_pos[1])**2)
 
     # If new distance smaller than previous, positif reward
     if (pd - d) >= 0:
@@ -343,7 +343,7 @@ def getState(snake, fruit):
 
     # state define by object near the head of the snake (body or wall) and the
     # position of the fruit with respect to the head
-    # Possible number of state = 2^3 * 4^2
+    # Possible number of state = 2^3 * 3^2
 
     wall = snake.checkWall()
     body = snake.checkBody()
