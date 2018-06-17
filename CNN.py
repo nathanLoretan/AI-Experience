@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+    # -*- coding: utf-8 -*-
 """
 @author: Nathan Loretan
 """
@@ -6,16 +6,14 @@
 import gzip
 import pickle
 import numpy as np
-from search import *
-from collections import defaultdict
 
 class Filter:
     """ Filter for Convolutional layer"""
 
-    # w = weight
-    # b = bias
-    # dw = delta weight
-    # db = delta bias
+    # w     = weight
+    # b     = bias
+    # dw    = delta weight
+    # db    = delta bias
     # alpha = learning factor
 
     b = 0
@@ -29,33 +27,59 @@ class Filter:
 
         self.alpha = alpha
 
-    def fUpdate(self, dw=0):
-        self.w = self.w - self.alpha * dw
+    def update(self):
+        self.w = self.w - self.alpha * self.dw
+        self.b = self.b - self.alpha * self.db
 
-    def bUpdate(self, db=0):
-        self.b = self.b - self.alpha * db
+        # Reset the detla weight and bias
+        self.dw = np.zeros(self.dw.shape)
+        self.db = 0
 
 class Softmax:
     """Softmax Neurone"""
 
-    # x = input
-    # y = output
-    # t = training data
-    # phi = back propagation value
+    # x  = input, vector
+    # y  = output, vector
+    # t  = training data
+    # dn = delta node used for back propagation
 
-    y   = 0
-    phi = 0
+    y  = 0
+    dn = 0
+
+    # Forward:
+    # --------
+    # yi = e^zi / sum{k, e^zk}
+    # zi = xi - max(x), used for more stability
+    #
+    # Error:
+    # -----
+    # t is a vector with 1 at the correct expected result and the rest is 0
+    # E = - sum{k, tk * log(yk)}
+    #
+    # Delta node:
+    # -----------
+    # dni =  dE/dxi
+    #     = - sum{k, d(tk * log(yk))/dyk * dyk/dxi}
+    # dlog(yk)/dyk = 1 / yk
+    #              _ yk * (1 - yi) , if i = k
+    # dyk/dxi  = /                              -> yk = e^xk / sum{j, e^xj}
+    #            \ _ - yk * yi    , if i != k
+    # dE/dxi = - sum{k, tk * 1/yk * dyk/dxi}
+    #        = -tk * 1/yi * yi * (1 - yi) - sum{k not i, tk * 1/yk * -yk * yi}
+    #        = -tk + tk * yi + tk * sum{k not i, yi}
+    #        =  tk * sum(k, yk) - yi  -> sum(k, yk) = 1
+    #        =  yi - tk
 
     # Constructor
     def __init__(self):
         pass
 
     def train(self, t):
-        self.phi = self.y - t
+        self.dn = self.y - t
 
     def run(self, x):
 
-        e = np.zeros(x.shape)
+        e   = np.zeros(x.shape)
         max = np.max(x)
 
         # Calculate exponentiel of each value
@@ -69,31 +93,61 @@ class Softmax:
 class FC:
     """ Fully Connected Neurone"""
 
-    # x = input
-    # y = output
-    # b = bias
-    # w = weight
+    # x     = input, vector
+    # y     = output, real number
+    # b     = bias
+    # w     = weight
+    # dn    = delta node used for backpropagation
     # alpha = learning factor
-    # phiw = value used for backpropagation of the weight
-    # phib = value used for backpropagation of the bias
 
     y   = 0
     b   = 0
     dw  = 0
     db  = 0
-    phiw = 0
+    dn  = 0
+
+    # Forward:
+    # --------
+    # y = sum{i, xi * wi} + b
+    #
+    # BackPropagation:
+    # ----------------
+    # dE/dwi = dE/dy * dy/dwi
+    # dy/dwi = xi
+    # dE/dy = dE/dx+1j                  -> l+1 = Softmax
+    #       = dn+1j
+    #       = dE/y+1j * dy+1j/dy
+    # dE/dy = sum{n, dE/dx+1nj}         -> l+1 = FC
+    #       = sum{n, dn+1nj}
+    #       = sum{n, dE/dy+1nj * dy+1nj/dy}
+    #
+    # where l = lth layer,
+    #       n = nth node of l+1,
+    #       j = jth node of l == jth connection of node n == Current node
+    #
+    # Delta node:
+    # -----------
+    # dni = dE/dxi
+    #    = dE/dy * dy/dxi
+    #    = dE/dy * wi
 
     # Constructor
     def __init__(self, nbrIn, alpha=0.1):
         self.x = np.zeros(nbrIn)
-        self.w = np.random.uniform(low=0.0, high=0.01, size=nbrIn)
+        self.w = np.random.uniform(low=-0.01, high=0.01, size=nbrIn)
 
         self.alpha = alpha
 
-    def backpropagation(self, phiw, phib):
-        self.phiw = phiw * self.w.T
-        self.w = self.w - self.alpha * phiw * self.x
-        self.b = self.b - self.alpha * phib
+    def back(self, dn, next="Softmax"):
+
+        if next == "Softmax":
+            temp = dn
+        elif next == "FC":
+            temp = np.sum(dn)
+
+        self.w  = self.w - self.alpha * temp * self.x
+        self.b  = self.b - self.alpha * temp
+        self.dn = temp * self.w
 
     def run(self, x):
 
@@ -108,22 +162,43 @@ class FC:
 class ReLu:
     """Rectified Linear Unit Neurone"""
 
-    # x = input
-    # y = output
-    # phi = value used for backpropagation
+    # x  = input, real number
+    # y  = output, real number
+    # dn = delta node used for backpropagation
 
-    y   = 0
-    phi = 0
+    y  = 0
+    dn = 0
+
+    # Forward:
+    # --------
+    # y = x if x > 0 else 0
+    #
+    # Delta node:
+    # -----------
+    # dn = dE/dx
+    #    = dE/dy * dy/dx
+    # dy/dx = 1 if x > 0 else 0
+    # dE/dy = dE/dx+1nj = dn+1nj       -> l+1 = MaxPool
+    #
+    # where l = lth layer,
+    #     n = nth node of l+1
+    #     j = jth node of l == jth connection of node n == current node
 
     # Constructor
     def __init__(self):
         self.x = 0
 
-    def backpropagation(self, phi):
-        if self.x < 0:
-            self.phi = 0
+    def back(self, dn, prev="MaxPool"):
+
+        if prev == "FC":
+            temp = np.sum(dn)
         else:
-            self.phi = phi
+            temp = dn
+
+        if self.x < 0:
+            self.dn = 0
+        else:
+            self.dn = temp
 
     def run(self, x):
 
@@ -137,21 +212,44 @@ class ReLu:
 class MaxPool:
     """Max Pooling Neurone"""
 
-    # x = input
-    # y = output
-    # i = keep the index of the max value, used for backpropagation
-    # phi = value used for backpropagation
+    # x  = input, matrix
+    # y  = output, real number
+    # i  = keep the index of the max value, used for backpropagation
+    # dn = delta node used for backpropagation
 
-    y   = 0
-    i   = 0
+    y = 0
+    i = 0
+
+    # Forward:
+    # --------
+    # y = max(x)
+    #
+    # Delta node:
+    # -----------
+    # dni = dE/dxi
+    #     = dE/y * dy/dxi
+    # dy/dxi = 1 if xi = max(x) else 0
+    # dE/dy = dE/dx+1
+    #       = sum{n, dE/dx+1nj}
+    #       = sum{n, dn+1nj}
+    #       = sum{n, dE/dy+1nj * dy+1nj/dx+1nj}   -> l+1 = FC
+    #
+    # where l = lth layer,
+    #       n = nth node of l+1,
+    #       j = jth node of l == jth connection of node n == Current node
 
     # Constructor
     def __init__(self, inShape):
-        self.phi = np.zeros(inShape)
+        self.dn = np.zeros(inShape)
 
-    def backpropagation(self, phi):
-        self.phi.fill(0)
-        self.phi[self.i] = phi
+    def back(self, dn, next="FC"):
+
+        if next == "FC":
+            self.dn.fill(0)
+            self.dn[self.i] = np.sum(dn)
+
+        elif next == "Conv":
+            pass
 
     def run(self, x):
 
@@ -165,32 +263,99 @@ class MaxPool:
 class Conv:
     """Convolutional Neurone"""
 
-    # x = input
-    # y = output
-    # phi = back propagation value
-    # w = weight
-    # b = bias
+    # x  = input, matrix
+    # y  = output, real number
+    # w  = weight
+    # b  = bias
     # dw = delta weight
+    # dn = delta node for back propagation
 
-    y   = 0
-    df  = 0
-    phi = 0
+    y  = 0
+    dn = 0
+
+    # Forward:
+    # --------
+    # The input matrix of the neurone is the same size than the weight used
+    # for the convolution and is a subset of the matrix in the input of the layer.
+    #
+    # yij = conv(xij, w) = sum{nm, x(i+n)(j+m) * wnm} + b
+    #
+    #       Layer inputs     filter     layer outputs
+    # E.g:  x00 x01 x02     w00 w01       y00 y01
+    #       x10 x11 x12     w10 w11       y10 y11
+    #       x20 x21 x22
+    #
+    # 1st Neurone: y00 = conv([(x00, x01), (x10, x11)], w)
+    # 2nd Neurone: y01 = conv([(x01, x02), (x11, x12)], w)
+    # 3rd Neurone: y10 = conv([(x10, x11), (x20, x21)], w)
+    # 4th Neurone: y11 = conv([(x11, x12), (x21, x22)], w)
+    #
+    # Backpropagation:
+    # ----------------
+    # dE/dwnm   = sum{ij, dE/dyij * dyij/dwnm}
+    # dE/dyij   = dn+1ij
+    # dyij/dwnm = x(i+n)(j+m)
+    #
+    #       Layer inputs     filter         delta node
+    # E.g:  x00 x01 x02     w00 w01       dn+100 dn+101
+    #       x10 x11 x12     w10 w11       dn+110 dn+111
+    #       x20 x21 x22
+    #
+    # dE/dw00 = dE/dy00 * x00 + dE/dy01 * x01 + dE/dy10 * x10 + dE/dy11 * x11
+    # dE/dw01 = dE/dy00 * x01 + dE/dy01 * x02 + dE/dy10 * x11 + dE/dy11 * x12
+    #
+    # But a neurone get only one dE/dyij corresponding to its output. Hence:
+    # 1st Neurone: dE/dy00 * x00, dE/dy00 * x01, dE/dy00 * x10, dE/dy00 * x11
+    # 2nd Neurone: dE/dy01 * x01, dE/dy01 * x02, dE/dy01 * x11, dE/dy01 * x12
+    # 3rd Neurone: dE/dy10 * x10, dE/dy10 * x11, dE/dy10 * x20, dE/dy10 * x21
+    # 4th Neurone: dE/dy11 * x11, dE/dy12 * x01, dE/dy21 * x10, dE/dy22 * x11
+    #           + -----------------------------------------------------------
+    #              dE/dw00      , dE/dw01      , dE/dw10      , dE/dw11
+    #
+    # Delta node:
+    # -----------
+    # dnij = full_conv(dE/dyij * w.T)
+    #
+    # dn00 = dE/dy00 * w00
+    # dn01 = dE/dy00 * w01 + dE/dy01 * w00
+    # dn02 =               + dE/dy01 * w01
+    #
+    # But a neurone get only one dE/dyij corresponding to its output. Hence:
+    # 1st Neurone: dE/dy00 * w00, dE/dy00 * w01, dE/dy00 * w10, dE/dy00 * w11
+    # 2nd Neurone: dE/dy01 * w00, dE/dy01 * w01, dE/dy01 * w10, dE/dy01 * w11
+    # 3rd Neurone: dE/dy10 * w00, dE/dy10 * w01, dE/dy10 * w10, dE/dy10 * w11
+    # 4th Neurone: dE/dy11 * w00, dE/dy11 * w01, dE/dy11 * w10, dE/dy11 * w11
+    #
+    # The addition of the different part of the dnij is done in the previous
+    # layer during the backPropagation
 
     # Constructor
     def __init__(self, inShape, filter):
         self.x = np.zeros(inShape)
         self.filter = filter
 
-    def backpropagation(self, phi):
-        self.dw  = np.sum(self.x * phi, axis=0)
-        self.phi = self.filter.w * phi
+    def back(self, dn, next="ReLu"):
+
+        if next == "ReLu":
+            self.filter.dw += np.sum(dn * self.x, axis=0)
+            self.filter.db += dn
+
+        elif next == "MaxPool":
+            pass
+
+        elif next == "FC":
+            temp = np.sum(dn)
+            self.filter.dw += np.sum(temp * self.x, axis=0)
+            self.filter.db += temp
+
+        self.dn = dn * self.filter.w
 
     def run(self, x):
 
         # Save for backpropagation
         self.x = x
 
-        # Convolution
+        # Multiply the input by the filter
         self.y = self.filter.b + np.sum(x * self.filter.w)
 
         return self.y
@@ -254,7 +419,7 @@ class CNN:
 
                             # Create new Conv neurone
                             self.layers[ll][d][i].append(Conv(inShape, \
-                                                              self.filters[ll][d]))
+                                                         self.filters[ll][d]))
 
             elif type == "ReLu":
 
@@ -352,8 +517,28 @@ class CNN:
 
                 if self.lInfo[l][0]  == "Conv":
 
-                    if self.lInfo[l+1][0] == "FC": # TODO
-                        pass
+                    if self.lInfo[l+1][0] == "FC":
+
+                        _d  = len(self.layers[l])
+                        _n1 = len(self.layers[l][0])
+                        _n2 = len(self.layers[l][0][0])
+
+                        for d in range(_d):
+                            for n1 in range(_n1):
+                                for n2 in range(_n2):
+
+                                    # Number of neurones in the next layer
+                                    _nn = len(self.layers[l+1])
+
+                                    # Create/reset the lists
+                                    dn = np.zeros(_nn)
+
+                                    # nn = node of next layer
+                                    for nn in range(_nn):
+                                        n = d * _d + n1 * _n1 + n2
+                                        dn[nn] = self.layers[l+1][nn].dn[n]
+
+                                    self.layers[l][d][n1][n2].back(dn, w, "FC")
 
                     elif self.lInfo[l+1][0]  == "ReLu":
 
@@ -362,23 +547,14 @@ class CNN:
                         _n2 = len(self.layers[l][0][0])
 
                         for d in range(_d):
-
-                            dw = np.zeros(self.filters[l][d].w.shape)
-                            db = 0
-
                             for n1 in range(_n1):
                                 for n2 in range(_n2):
 
-                                    phi = self.layers[l+1][d][n1][n2].phi
+                                    dn = self.layers[l+1][d][n1][n2].dn
+                                    self.layers[l][d][n1][n2].back(dn)
 
-                                    self.layers[l][d][n1][n2].backpropagation(phi)
-
-                                    # Update layer's filter
-                                    dw = np.add(dw, self.layers[l][d][n1][n2].dw)
-                                    db += phi
-
-                            self.filters[l][d].fUpdate(dw)
-                            self.filters[l][d].bUpdate(db)
+                            # Update the weight of the filter
+                            self.filters[l][d].update()
 
                     elif self.lInfo[l+1][0]  == "MaxPool": # TODO
                         pass
@@ -389,28 +565,48 @@ class CNN:
                 elif self.lInfo[l][0]  == "ReLu":
 
                     if self.lInfo[l+1][0] == "FC": # TODO
-                        pass
+
+                        _d  = len(self.layers[l])
+                        _n1 = len(self.layers[l][0])
+                        _n2 = len(self.layers[l][0][0])
+
+                        for d in range(_d):
+                            for n1 in range(_n1):
+                                for n2 in range(_n2):
+
+                                    # Number of neurones in the next layer
+                                    _nn = len(self.layers[l+1])
+
+                                    # Create/reset the lists
+                                    dn = np.zeros(_nn)
+
+                                    # nn = node of next layer
+                                    for nn in range(_nn):
+                                        n = d * _d + n1 * _n1 + n2
+                                        dn[nn] = self.layers[l+1][nn].dn[n]
+
+                                    self.layers[l][d][n1][n2].back(dn, "FC")
 
                     elif self.lInfo[l+1][0] == "MaxPool":
 
-                        phi = np.zeros((len(self.layers[l]), \
+                        dn = np.zeros((len(self.layers[l]), \
                                         len(self.layers[l][0]), \
                                         len(self.layers[l][0][0])))
 
-                        _d  = len(self.layers[l+1])
-                        _n1 = len(self.layers[l+1][0])
-                        _n2 = len(self.layers[l+1][0][0])
+                        _nd  = len(self.layers[l+1])
+                        _nn1 = len(self.layers[l+1][0])
+                        _nn2 = len(self.layers[l+1][0][0])
 
-                        for d in range(_d):
-                            for n1 in range(_n1):
-                                for n2 in range(_n2):
+                        for nd in range(_nd):
+                            for nn1 in range(_nn1):
+                                for nn2 in range(_nn2):
 
                                     (_, f, s)   = self.lInfo[l+1][1]
-                                    (x1, x2) = (n1*s[0], n1*s[0]+f[0])
-                                    (y1, y2) = (n2*s[1], n2*s[1]+f[1])
+                                    (x1, x2) = (nn1*s[0], nn1*s[0]+f[0])
+                                    (y1, y2) = (nn2*s[1], nn2*s[1]+f[1])
 
-                                    temp = self.layers[l+1][d][n1][n2].phi
-                                    phi[d, x1:x2, y1:y2] = temp
+                                    temp = self.layers[l+1][nd][nn1][nn2].dn
+                                    dn[d, x1:x2, y1:y2] = temp
 
                         _d  = len(self.layers[l])
                         _n1 = len(self.layers[l][0])
@@ -419,27 +615,28 @@ class CNN:
                         for d in range(_d):
                             for n1 in range(_n1):
                                 for n2 in range(_n2):
-                                    self.layers[l][d][n1][n2].backpropagation(phi[d][n1][n2])
+                                    self.layers[l][d][n1][n2].back(dn[d][n1][n2])
 
-                    elif self.lInfo[l+1][0] == "Conv": # TODO padding
+                    elif self.lInfo[l+1][0] ==  "Conv": # TODO padding
 
-                        phi = np.zeros((len(self.layers[l][0]), \
+                        dn = np.zeros((len(self.layers[l][0]), \
                                         len(self.layers[l][0][0])))
 
-                        _d  = len(self.layers[l+1])
-                        _n1 = len(self.layers[l+1][0])
-                        _n2 = len(self.layers[l+1][0][0])
+                        _nd  = len(self.layers[l+1])
+                        _nn1 = len(self.layers[l+1][0])
+                        _nn2 = len(self.layers[l+1][0][0])
 
-                        for d in range(_d):
-                            for n1 in range(_n1):
-                                for n2 in range(_n2):
+                        for nd in range(_nd):
+                            for nn1 in range(_nn1):
+                                for nn2 in range(_nn2):
 
                                     (_, _, f, p, s, _) = self.lInfo[l+1][1]
-                                    (x1, x2) = (n1*s[0], n1*s[0]+f[0])
-                                    (y1, y2) = (n2*s[1], n2*s[1]+f[1])
+                                    (x1, x2) = (nn1*s[0], nn1*s[0]+f[0])
+                                    (y1, y2) = (nn2*s[1], nn2*s[1]+f[1])
 
-                                    temp = self.layers[l+1][d][n1][n2].phi
-                                    phi[x1:x2, y1:y2] = np.add(phi[x1:x2, y1:y2], temp)
+                                    temp = self.layers[l+1][nd][nn1][nn2].dn
+                                    dn[x1:x2, y1:y2] = np.add(dn[x1:x2, y1:y2],\
+                                                              temp)
 
                         _d  = len(self.layers[l])
                         _n1 = len(self.layers[l][0])
@@ -448,7 +645,7 @@ class CNN:
                         for d in range(_d):
                             for n1 in range(_n1):
                                 for n2 in range(_n2):
-                                    self.layers[l][d][n1][n2].backpropagation(phi[n1][n2])
+                                    self.layers[l][d][n1][n2].back(dn[n1][n2])
 
                 elif self.lInfo[l][0]  == "MaxPool":
 
@@ -462,19 +659,18 @@ class CNN:
                             for n1 in range(_n1):
                                 for n2 in range(_n2):
 
-                                    phiw = list()
+                                    # Number of neurones in the next layer
+                                    _nn = len(self.layers[l+1])
+
+                                    # Create/reset the lists
+                                    dn = np.zeros(_nn)
 
                                     # nn = node of next layer
-                                    for nn in range(len(self.layers[l+1])):
+                                    for nn in range(_nn):
+                                        n = d * _n1 * _n2 + n1 * _n2 + n2
+                                        dn[nn] = self.layers[l+1][nn].dn[n]
 
-                                        n = d  * len(self.layers[l]) + \
-                                            n1 * len(self.layers[l][d]) + n2
-
-                                        # Get the backpropagation value from
-                                        # the previous layer
-                                        phiw.append(self.layers[l+1][nn].phiw[n])
-
-                                    self.layers[l][d][n1][n2].backpropagation(np.sum(phiw))
+                                    self.layers[l][d][n1][n2].back(dn)
 
                     elif self.lInfo[l+1][0] == "MaxPool": # TODO
                         pass
@@ -487,14 +683,27 @@ class CNN:
                     if self.lInfo[l+1][0]  == "Softmax":
 
                         # Get the backpropagation value from the previous layer
-                        phiw = self.layers[l+1].phi
-                        phib = np.sum(phiw)
+                        dn = self.layers[l+1].dn
 
                         for n in range(len(self.layers[l])):
-                            self.layers[l][n].backpropagation(phiw[n], phib)
+                            self.layers[l][n].back(dn[n])
 
-                    elif self.lInfo[l+1][0]  == "FC":  # TODO
-                        pass
+                    elif self.lInfo[l+1][0]  == "FC":
+
+                        # Number of neurones in the next layer
+                        nLen = len(self.layers[l+1])
+
+                        for n in range(len(self.layers[l])):
+
+                            # Create/reset the lists
+                            dn = np.zeros(nLen)
+
+                            # nn = node of next layer
+                            for nn in range(nLen):
+
+                                dn[nn] = self.layers[l+1][nn].dn[n]
+
+                            self.layers[l][n].back(dn, "FC")
 
         return self.y
 
@@ -515,7 +724,7 @@ class CNN:
             lOut = np.zeros(np.asarray(self.layers[l]).shape)
 
             if self.lInfo[l][0] == "Softmax":
-                self.y = self.layers[l].run(lIn)
+                lOut = self.layers[l].run(lIn)
 
             elif self.lInfo[l][0] == "FC":
                 for n in range(len(self.layers[l])):
@@ -554,6 +763,7 @@ class CNN:
 
                             lOut[d, n1, n2] = self.layers[l][d][n1][n2].run(nIn)
 
+        self.y = lOut
         return self.y
 
 # ------------------------------------------------------------------------------

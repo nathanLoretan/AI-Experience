@@ -27,17 +27,9 @@ class Perceptron:
 
     b = 0
     y = 0
-
-    # phiw = 0
-    # phib = 0
-    # phiw  = value used for backpropagation of the weight
-    # phib  = value used for backpropagation of the bias
-
     dw = 0
     db = 0
-
-    dnw = 0
-    dnb = 0
+    dn = 0
 
     # Constructor
     def __init__(self, nbrIn, gamma=0.5, alpha=0.4):
@@ -49,35 +41,39 @@ class Perceptron:
         # Need to assign rand weight to train a network with hidden layers
         self.w = np.random.uniform(low=-2, high=2, size=nbrIn)
 
-    def activation(self, y):
-        return (1.0 / (1.0 + exp(-y))) # Sigmoid
-
-    def backpropagation(self, dn, w):
+    def back(self, dn):
 
         gamma = self.gamma
         alpha = self.alpha
 
-        # Error probagate from layer +1 and using Sigmoid as activation
-        # function
-        #
-        # dE/dw   = dE/dy * dy/dz * dz/dw
-        # dE/dy   = sum{i, dE/dz+1i * dz+1i/dy} where i = ith node of layer +1
-        # dE/dz+1 = dE/dy+1i * dy+1i/dz+1i = dn+1i
-        # dz+1/dy = w+1i
+        # dE/dwi  = dE/dy * dy/dz * dz/dwi
         # dy/dz   = y * (1 - y)
-        # dz/dw   = x
+        # dz/dwi  = xi
+        # dE/dy   = dE/dx+1
+        #         = sum{n, dE/dx+1nj}
+        #         = sum{n, dn+1nj}
+        #         = sum{n, dE/dy+1nj * dy+1n/dz+1nj * dz+1nj/dx+1nj}
+        #
+        # where l = lth layer,
+        #       n = nth node of l+1,
+        #       j = jth node of l == jth connection of node n == Current node
         #
         # Delta node:
-        # dn = dE/dy * dy/dz = sum{i, dE/dz+1i * dz+1i/dy} * y * (1 - y)
+        # dni = dE/dxi
+        #     = dE/dy * dy/dz * dz/dxi
+        #     = sum{n, dn+1nj} * y * (1 - y) * wi
+
+        # dE/dy * dE/dz
+        temp = self.y * (1.0 - self.y) * np.sum(dn)
 
         # Calculate the delta node used in backpropagation
-        self.dn = self.y * (1.0 - self.y) * np.sum(dn * w)
+        self.dn = np.multiply(temp, self.w)
 
         # Calculate dw and db using smoothing factor
-        # dw = gamma * dw + (1 - gamma) * dn * x
-        self.db = gamma * self.db + (1.0 - gamma) * self.dn
+        # dwi = gamma * dwi + (1 - gamma) * dE/dwi
+        self.db = gamma * self.db + (1.0 - gamma) * temp
         self.dw = np.add(gamma * self.dw,\
-                         np.multiply((1.0 - gamma) * self.dn, self.x))
+                         np.multiply((1.0 - gamma) * temp, self.x))
 
         # wNew = wOld + alpha * dw
         self.w = self.w + self.alpha * self.dw
@@ -92,25 +88,31 @@ class Perceptron:
             gamma = self.gamma
             alpha = self.alpha
 
-            # Squared Error is used to train the neural network and using
-            # sigmoid as activation function
+            # E = 1/2 * (t - y)^2
             #
-            # dE/dw = dE/dy * dy/dz * dz/dw
-            # dE/dy = (t - y)
-            # dy/dz = y * (1 - y)
-            # dz/dw = x
+            # dE/dwi = dE/dy * dy/dz * dz/dwi
+            # dE/dy  = (t - y)
+            # dy/dz  = y * (1 - y)
+            # dz/dwi = xi
+            #
+            # dE/dwi = (t - y) * y * (1 - y) * xi
             #
             # Delta node:
-            # dn = dE/dy * dy/dz = (t - y) * y * (1 - y)
+            # dni = dE/dxi
+            #     = dE/dy * dE/dz * dz/dxi
+            #     = (t - y) * y * (1 - y) * wi
+
+            # dE/dy * dy/dz
+            temp = self.y * (1.0 - self.y) * (t   - self.y)
 
             # Calculate the delta node used in backpropagation
-            self.dn = self.y * (1.0 - self.y) * (t   - self.y)
+            self.dn = np.multiply(temp, self.w)
 
             # Calculate dw and db using smoothing factor
-            # dw = gamma * dw + (1 - gamma) * dn * x
-            self.db = gamma * self.db + (1.0 - gamma) * self.dn
+            # dwi = gamma * dwi + (1 - gamma) * dE/dwi
+            self.db = gamma * self.db + (1.0 - gamma) * temp
             self.dw = np.add(gamma * self.dw,\
-                             np.multiply((1.0 - gamma) * self.dn, self.x))
+                             np.multiply((1.0 - gamma) * temp, self.x))
 
             # wNew = wOld + alpha * dw
             self.w = self.w + alpha * self.dw
@@ -120,6 +122,9 @@ class Perceptron:
 
     def run(self, x):
 
+        # z = sum{i, xi * wi} + b
+        # y = sigmoid(z) = 1 / (1 + e^-z)
+
         # Save the input for backpropagation
         self.x = x
 
@@ -127,7 +132,7 @@ class Perceptron:
         z = self.b + np.sum(self.x * self.w)
 
         # Activation function
-        self.y = self.activation(z)
+        self.y = (1.0 / (1.0 + exp(-z)))
 
         return self.y
 
@@ -186,20 +191,17 @@ class MLP:
                 # Node of the layer
                 for n in range(len(self.layers[l])):
 
-                    # Number of neurones in the previous layer
-                    pLen = len(self.layers[l+1])
+                    # Number of neurones in the next layer
+                    nLen = len(self.layers[l+1])
 
                     # Create/reset the lists
-                    w  = np.zeros(pLen)
-                    dn = np.zeros(pLen)
+                    dn = np.zeros(nLen)
 
                     # nn = node of next layer
-                    for nn in range(pLen):
+                    for nn in range(nLen):
+                        dn[nn] = self.layers[l+1][nn].dn[n]
 
-                        w[nn]  = self.layers[l+1][nn].w[n]
-                        dn[nn] = self.layers[l+1][nn].dn
-
-                        self.layers[l][n].backpropagation(dn, w)
+                    self.layers[l][n].back(dn)
 
         return self.y
 
@@ -401,7 +403,7 @@ def kernel():
 if __name__ == "__main__":
 
     classification2(1)
-    classification2(2)
+    # classification2(2)
     classification2(3)
     classification2(4)
     xor()

@@ -6,7 +6,6 @@
 import sys
 import pygame
 import numpy as np
-from search import *
 from math import sqrt, exp
 from random import randint
 from pygame.locals import *
@@ -87,11 +86,11 @@ class QLearning():
         if s is not None:
             Nsa[s, a] += 1
             Q[s, a]   += alpha(Nsa[s, a]) * \
-                           (r + gamma * max(Q[ns, na] for na in A) - \
+                           (r + gamma * np.max([Q[ns, na] for na in A]) - \
                             Q[s, a])
 
         # Get the next action to perform
-        na = argmax(A, key=lambda na: self.f(Q[ns, na], Nsa[ns, na]))
+        na = np.argmax([self.f(Q[ns, na], Nsa[ns, na]) for na in A])
 
         # Save the next state and next action
         self.s, self.a = ns, na
@@ -109,12 +108,12 @@ WINDOW_WIDTH  = 30
 WINDOW_LENGTH = 30
 WINDOW_COLOR  = (50, 50, 50)
 
-MOVE_REWARD_POS  =      10 # Reward for good move
-MOVE_REWARD_NEG  =      -1 # Reward for bad move
+MOVE_REWARD_POS  =  0 # Reward for good move
+MOVE_REWARD_NEG  = -1 # Reward for bad move
 FRUIT_REWARD     =  sys.maxint
 LOSE_REWARD      = -sys.maxint - 1
 
-TIMEOUT          = 100000 # 100s, avoid the snake to be blocked
+TIMEOUT          = 20000 # 20s, avoid the snake to be blocked
 ACTION_TIME      = 10 #ms
 
 FRUIT_COLOR  = (225, 80, 50)
@@ -295,7 +294,10 @@ class Fruit:
     posy      = 0
     fruit_img = None
 
-    def __init__(self):
+    def __init__(self, snake):
+
+        self.snake = snake
+
         self.newPosition()
 
         self.fruit_img = pygame.Surface((SQUARE_SIZE,SQUARE_SIZE))
@@ -307,6 +309,12 @@ class Fruit:
     def newPosition(self):
         self.posx = SQUARE_SIZE * randint(0, WINDOW_WIDTH-1)
         self.posy = SQUARE_SIZE * randint(0, WINDOW_LENGTH-1)
+
+        # Check if the new fruit is on the position than the snake
+        for i in range(len(self.snake.body)):
+            if  self.snake.body[i][0] == self.posx and \
+                self.snake.body[i][1] == self.posy:
+                self.newPosition()
 
     def getPosition(self):
         return (self.posx, self.posy)
@@ -469,7 +477,7 @@ if __name__ == "__main__":
 
     # Initate AI Agent, actions: "RIGHT" = 0 "LEFT" = 1 "STRAIGHT" = 2
     q_learner = QLearning(A     = [0,1,2],
-                          Ne    = 0,
+                          Ne    = 100,
                           Rplus = 1000,
                           alpha = alpha_cst,
                           gamma = 0.9)
@@ -489,7 +497,7 @@ if __name__ == "__main__":
     snake = Snake()
 
     # place one fruit
-    fruit = Fruit()
+    fruit = Fruit(snake)
 
     # Init timer
     clk = pygame.time.Clock()
