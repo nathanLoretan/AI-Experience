@@ -5,85 +5,340 @@
 
 import sys
 import gzip
+import time
 import pygame
-from CNN import *
+import pickle
+import numba
+from numba import cuda
 import threading
 import numpy as np
 from copy import deepcopy, copy
 from random import randint
 from math import sqrt, exp
 from pygame.locals import *
+import matplotlib.pyplot as plt
 from collections import defaultdict
 
-class DQN:
-    """ Deep Q Neurone"""
+# Rectified l_inear Unit Neurone ================================================
 
-    # x     = input
-    # z     = adder output
-    # Q     = output
-    # w     = weight
-    # b     = bias
-    # a     = action defined for the neurone
-    # t     = training data
-    # alpha = learning factor
-    # gamma = discount factor
-    # dw    = delta weight
-    # db    = delta bias
-    # dn    = delta node used for backpropagation
-    # selected = if the action was selected
+# x  = input, real number
+# y  = output, real number
+# dn = delta node used for backpropagation
 
-    b = 0
-    Q = 0
+# Forward:
+# --------
+# y = x if x > 0 else 0
+#
+# Delta node:
+# -----------
+# dn = dE/dx
+#    = dE/dy * dy/dx
+# dy/dx = 1 if x > 0 else 0
+# dE/dy = dE/dx+1nj = dn+1nj       -> l+1 = MaxPool
+#
+# where l = lth layer,
+#     n = nth node of l+1
+#     j = jth node of l == jth connection of node n == current node
 
-    dw = 0
-    db = 0
-    dn = 0
+@cuda.jit
+def relu_back(dn1, dn0, x, prev="FC"):
 
-    def __init__(self, nbrIn, a, alpha=0.5, gamma=0.9):
+    d  = cuda.blockIdx.x
+    n1 = cuda.blockIdx.y
+    n2 = cuda.threadIdx.x
 
-        self.gamma    = gamma
-        self.alpha    = alpha
-        self.a        = a
+    ln2 = cuda.blockDim.x
+    ln1 = cuda.gridDim.y
 
-        self.x = np.zeros(nbrIn)
-        self.w = np.random.uniform(low=-1e-4, high=1e-4, size=nbrIn)
+    temp = 0
 
-    def train(self, Qplus, r, selected):
+    if prev[0] is "FC":
+        for i in range(len(dn1)):
+            temp += dn1[i, d * ln1 * ln2 + n1 * ln2 + n2]
+    else:
+        temp = dn1[n1, n2]
 
-        # Qplus = max(a, Q(s', a))
-        # E = 1/2(Q - (R + gamma * Qplus))^2
-        #
-        # dE/dwi = dE/dQ * dQ/dwi
-        # dE/dQ = (Q - (R + gamma * Qplus))
-        # dQ/dwi = xi
-        #
-        # dni = dE/dxi = dE/dQ * dQ/dz * dz/dxi
-        #    = (Q - (R + gamma * Qplus)) * wi
+    if x[d, n1, n2] < 0:
+        dn0[d, n1, n2] = 0
+    else:
+        dn0[d, n1, n2] = temp
 
-        # dE/dQ
-        temp = (self.Q - (r + self.gamma * Qplus))
+@cuda.jit
+def relu_run(x, y):
 
-        #  dw = alpha * (Q - (R + gamma * Qplus)) * dQ/dwi
-        self.dw = self.alpha * temp * self.x
-        self.db = self.alpha * temp
+    d  = cuda.blockIdx.x
+    n1 = cuda.blockIdx.y
+    n2 = cuda.threadIdx.x
 
-        # No update if the action was not selected
-        self.w = self.w - self.dw * selected
-        self.b = self.b - self.db * selected
+    y[d, n1, n2] = max(0, x[d, n1, n2])
 
-        self.dn = temp * self.w * selected
+@cuda.jit
+def relu2_back(dn1, dn0, x):
 
-    def run(self, x):
+    n = cuda.threadIdx.x
 
-        # Q = sum{i, xi * wi} + b
+    temp = 0
 
-        # Save for backpropagation
-        self.x = x
+    for i in range(len(dn1)):
+        temp += dn1[i, n]
 
-        # Adder
-        self.Q = self.b + np.sum(self.x * self.w)
+    if x[n] < 0:
+        dn0[n] = 0
+    else:
+        dn0[n] = temp
 
-        return self.Q
+@cuda.jit
+def relu2_run(x, y):
+
+    n = cuda.threadIdx.x
+
+    y[n] = max(0, x[n])
+
+# Fully Connected Neurone ======================================================
+
+# x     = input, vector
+# y     = output, real number
+# b     = bias
+# w     = weight
+# dn    = delta node used for backpropagation
+# alpha = learning factor
+
+# Forward:
+# --------
+# y = sum{i, xi * wi} + b
+#
+# BackPropagation:
+# ----------------
+# dE/dwi = dE/dy * dy/dwi
+# dy/dwi = xi
+# dE/dy = dE/dx+1j                  -> l+1 = Softmax
+#       = dn+1j
+#       = dE/y+1j * dy+1j/dy
+# dE/dy = sum{n, dE/dx+1nj}         -> l+1 = FC or DQN
+#       = sum{n, dn+1nj}
+#       = sum{n, dE/dy+1nj * dy+1nj/dy}
+#
+# where l = lth layer,
+#       n = nth node of l+1,
+#       j = jth node of l == jth connection of node n == Current node
+#
+# Delta node:
+# -----------
+# dni = dE/dxi
+#    = dE/dy * dy/dxi
+#    = dE/dy * wi
+
+@cuda.jit
+def fc_back(dn1, dn0, x, w, b, alpha):
+
+    n = cuda.threadIdx.x
+
+    temp = dn1[n]
+
+    # for i in range(len(dn1)):
+    #     temp += dn1[i, n]
+
+    b[n] -= alpha[0] * temp
+    for i in range(len(x)):
+        w[n, i] -= alpha[0] * temp * x[i]
+        dn0[n, i] = temp * w[n, i]
+
+@cuda.jit
+def fc_run(x, y, w, b):
+
+    n = cuda.threadIdx.x
+
+    sum = 0
+
+    for i in range(len(x)):
+        sum += x[i] * w[n, i]
+
+    # Adder
+    y[n] = b[n] + sum
+
+# Convolutional Neurone ========================================================
+
+# x  = input, matrix
+# y  = output, real number
+# w  = weight
+# b  = bias
+# dw = delta weight
+# db    = delta bias
+# dn = delta node for back propagation
+# alpha = learning factor
+
+# Forward:
+# --------
+# The input matrix of the neurone is the same size than the weight used
+# for the convolution and is a subset of the matrix in the input of the layer.
+#
+# yij = conv(xij, w) = sum{nm, x(i+n)(j+m) * wnm} + b
+#
+#       Layer inputs     filter     layer outputs
+# E.g:  x00 x01 x02     w00 w01       y00 y01
+#       x10 x11 x12     w10 w11       y10 y11
+#       x20 x21 x22
+#
+# 1st Neurone: y00 = conv([(x00, x01), (x10, x11)], w)
+# 2nd Neurone: y01 = conv([(x01, x02), (x11, x12)], w)
+# 3rd Neurone: y10 = conv([(x10, x11), (x20, x21)], w)
+# 4th Neurone: y11 = conv([(x11, x12), (x21, x22)], w)
+#
+# Backpropagation:
+# ----------------
+# dE/dwnm   = sum{ij, dE/dyij * dyij/dwnm}
+# dE/dyij   = dn+1ij
+# dyij/dwnm = x(i+n)(j+m)
+#
+#       Layer inputs     filter         delta node
+# E.g:  x00 x01 x02     w00 w01       dn+100 dn+101
+#       x10 x11 x12     w10 w11       dn+110 dn+111
+#       x20 x21 x22
+#
+# dE/dw00 = dE/dy00 * x00 + dE/dy01 * x01 + dE/dy10 * x10 + dE/dy11 * x11
+# dE/dw01 = dE/dy00 * x01 + dE/dy01 * x02 + dE/dy10 * x11 + dE/dy11 * x12
+#
+# But a neurone get only one dE/dyij corresponding to its output. Hence:
+# 1st Neurone: dE/dy00 * x00, dE/dy00 * x01, dE/dy00 * x10, dE/dy00 * x11
+# 2nd Neurone: dE/dy01 * x01, dE/dy01 * x02, dE/dy01 * x11, dE/dy01 * x12
+# 3rd Neurone: dE/dy10 * x10, dE/dy10 * x11, dE/dy10 * x20, dE/dy10 * x21
+# 4th Neurone: dE/dy11 * x11, dE/dy12 * x01, dE/dy21 * x10, dE/dy22 * x11
+#           + -----------------------------------------------------------
+#              dE/dw00      , dE/dw01      , dE/dw10      , dE/dw11
+#
+# Delta node:
+# -----------
+# dnij = full_conv(dE/dyij * w.T)
+#
+# dn00 = dE/dy00 * w00
+# dn01 = dE/dy00 * w01 + dE/dy01 * w00
+# dn02 =               + dE/dy01 * w01
+#
+# But a neurone get only one dE/dyij corresponding to its output. Hence:
+# 1st Neurone: dE/dy00 * w00, dE/dy00 * w01, dE/dy00 * w10, dE/dy00 * w11
+# 2nd Neurone: dE/dy01 * w00, dE/dy01 * w01, dE/dy01 * w10, dE/dy01 * w11
+# 3rd Neurone: dE/dy10 * w00, dE/dy10 * w01, dE/dy10 * w10, dE/dy10 * w11
+# 4th Neurone: dE/dy11 * w00, dE/dy11 * w01, dE/dy11 * w10, dE/dy11 * w11
+
+@cuda.jit
+def conv_back(dn1, dn0, x, w, b, s, f, alpha):
+
+    d  = cuda.blockIdx.x
+    n1 = cuda.blockIdx.y
+    n2 = cuda.threadIdx.x
+
+    # s = stride
+    # f = filter
+    s1, s2 = s
+    f1, f2 = f
+
+    b[d, n1, n2] -= alpha[0] * dn1[d, n1, n2]
+    for _d in range(len(x)):
+        for _f1 in range(f1):
+            for _f2 in range(f2):
+                w[d][_f1][_f2] -= \
+                    alpha[0] * dn1[d, n1, n2] * x[_d, n1*s1 + _f1, n2*s2 + _f2]
+
+    cuda.syncthreads()
+
+    for _f1 in range(f1):
+        for _f2 in range(f2):
+            dn0[n1*s1 + _f1, n2*s2 + _f2] += dn1[d, n1, n2] * w[d][_f1][_f2]
+
+@cuda.jit
+def conv_run(x, y, w, b, s, f):
+
+    d  = cuda.blockIdx.x
+    n1 = cuda.blockIdx.y
+    n2 = cuda.threadIdx.x
+
+    # s = stride
+    # f = filter
+    s1, s2 = s
+    f1, f2 = f
+
+    sum = 0
+
+    # d of x is not necessarily d of y
+    for _d in range(len(x)):
+        for _f1 in range(f1):
+            for _f2 in range(f2):
+                sum += x[_d, n1*s1 + _f1, n2*s2 + _f2] * w[d, _f1, _f2]
+
+    # Multiply the input by the filter
+    y[d, n1, n2] = b[d, n1, n2] + sum
+
+# Deep Q Neurone ===============================================================
+
+# x     = input
+# z     = adder output
+# Q     = output
+# w     = weight
+# b     = bias
+# a     = action defined for the neurone
+# t     = training data
+# alpha = learning factor
+# gamma = discount factor
+# dw    = delta weight
+# db    = delta bias
+# dn    = delta node used for backpropagation
+# selected = if the action was selected
+
+# Forward:
+# --------
+# Q = sum{i, xi * wi} + b
+#
+# Error:
+# ------
+# Qplus = max(a, Q(s', a))
+# E = 1/2((R + gamma * Qplus) - Q)^2
+#
+# Train:
+# ------
+# dE/dwi = dE/dQ * dQ/dwi
+# dE/dQ = (Q - (R + gamma * Qplus))
+# dQ/dwi = xi
+# -> wi = wi - alpha * dwi
+# -> wi = wi + alpha * (R + gamma * Qplus - Q) * xi
+#
+# Delta node:
+# -----------
+# dni = dE/dxi = dE/dQ * dQ/dxi
+#    = (Q - (R + gamma * Qplus)) * wi
+
+@cuda.jit
+def dqn_train(dn, x, Q, Qplus, r, w, b, alpha, gamma, sel):
+
+    n = cuda.threadIdx.x
+
+    # dE/dQ
+    temp = r[n] + gamma[0] * Qplus[n] - Q[n]
+
+    # No update if the action was not selected
+    # dw = alpha * dE/dQ * dQ/dwi
+    b[n] += alpha[0] * temp * sel[n]
+    for i in range(len(x)):
+            w[n][i] += alpha[0] * temp * x[i] * sel[n]
+            dn[n][i] = temp * w[n][i] * sel[n] * -1
+
+@cuda.jit
+def dqn_run(x, Q, w, b):
+
+    n = cuda.threadIdx.x
+
+    sum = 0
+
+    for i in range(len(x)):
+        sum += x[i] * w[n][i]
+
+    # Adder
+    Q[n] = b[n] + sum
+
+# Convolutional Neural Network =================================================
+
+# create mutex global to save the DQL with pickle
+layers_mutex = threading.Lock()
+rply_mutex = threading.Lock()
 
 class DQL:
     """Convolutional Neural Network"""
@@ -101,21 +356,25 @@ class DQL:
     # a = action
     # e = experiance replay
 
-    a = 0
-    x = None
+    a = 0       # Save action for experiance replay
+    x = None    # Save state for experiance replay
 
-    replay = defaultdict()
-    replay_cnt = 0
-    replay_limit = 30
-    replay_stop = False
+    rply_save = defaultdict()
+    rply_limit    = 1000
+    rply_samples  = 10000
+    rply_stop     = False
+    rply_cnt      = 0
 
-    def __init__(self, layers, inShape, explore):
+    update_counter = 0
 
-        self.explore = explore
+    explore_cnt = 0
 
-        self.lInfo   = []   # All the layers type and shape
+    def __init__(self, layers):
+
+        self.l_info   = []   # All the layers type and shape
         self.layers  = []   # All the layers of neurones
-        self.filters = {}   # All the filter for the Conv neurones
+
+        prev_out = 0
 
         # Parse the layers indicated and create the neural network
         for l in range(len(layers)):
@@ -124,7 +383,7 @@ class DQL:
             data = layers[l][1]
 
             # Add a new layer
-            self.lInfo.append(layers[l])
+            self.l_info.append(layers[l])
             self.layers.append([])
 
             ll = len(self.layers)-1  # last layer index
@@ -132,151 +391,120 @@ class DQL:
 
             if type == "Conv":
 
-                (nbrD, inShape, fShape, pShape, sShape, alpha) = data
+                d, inp, f, p, s, alpha, w, b = data
 
                 # Determine the number of neurones
-                n1, n2 = self.nbr_neurones(inShape, fShape, pShape, sShape)
+                n1, n2 = self.nbr_neurones(inp, f, p, s)
+
+                prev_out = (d, n1, n2)
 
                 # Each depth of the layer has one filter which is common to all
                 # the neurones of the depth. The bias is part of the class Filter
-                self.filters[ll] = []
-
-                # Create the neurones and add them to the layer
-                for d in range(nbrD):
-
-                    # Add depth to the layer
-                    self.layers[ll].append([])
-
-                    # Add filter to the layer for the new depth
-                    self.filters[ll].append(Filter(fShape, alpha))
-
-                    for i in range(n1):
-
-                        self.layers[ll][d].append([])
-
-                        for y in range(n2):
-
-                            # Create new Conv neurone
-                            self.layers[ll][d][i].append(Conv(inShape, \
-                                                        self.filters[ll][d]))
+                self.layers[ll] = \
+                {
+                    'x':  np.zeros((d, inp[0], inp[1])),
+                    'y':  np.zeros((d, n1, n2)),
+                    'dn': np.zeros((inp[0], inp[0])),
+                    'w':  np.random.uniform(w[0], w[1], (d, f[0], f[1])),
+                    'b':  np.full((d, n1, n2), b),
+                    's':  s,
+                    'f':  f,
+                    'alpha': alpha,
+                    'shape': (d, n1, n2)
+                }
 
             elif type == "ReLu":
 
                 # Each ReLu node is directly connected to the previous one.
                 # Hence, there is as much ReLu neurone than the number of
                 # neurones in the previous layer.
-                n1, n2 = len(self.layers[pl][0]), len(self.layers[pl][0][0])
+                d, n1, n2 = prev_out
 
-                # Create the neurones and add them to the layer
-                for d in range(len(self.layers[pl])):
+                self.layers[ll] = \
+                {
+                    'x':  np.zeros((d, n1, n2)),
+                    'y':  np.zeros((d, n1, n2)),
+                    'dn': np.zeros((d, n1, n2)),
+                    'shape': (d, n1, n2)
+                }
 
-                    # Add depth to the layer
-                    self.layers[ll].append([])
+            elif type == "ReLu2":
 
-                    for i in range(n1):
+                # Each ReLu node is directly connected to the previous one.
+                # Hence, there is as much ReLu neurone than the number of
+                # neurones in the previous layer.
+                n = prev_out
 
-                        self.layers[ll][d].append([])
-
-                        for y in range(n2):
-
-                            # Create new ReLu neurone
-                            self.layers[ll][d][i].append(ReLu())
-
-            elif type == "MaxPool":
-
-                (inShape, poolShape, sShape) = data
-
-                # Determine the number of neurones
-                n1, n2 = self.nbr_neurones(inShape, poolShape, (0,0), sShape)
-
-                # Create the neurones and add them to the layer
-                for d in range(len(self.layers[pl])):
-
-                    # Add depth to the layer
-                    self.layers[ll].append([])
-
-                    for i in range(n1):
-
-                        self.layers[ll][d].append([])
-
-                        for y in range(n2):
-
-                            # Create MaxPool neurone
-                            self.layers[ll][d][i].append(MaxPool(poolShape))
+                self.layers[ll] = \
+                {
+                    'x':  np.zeros(n),
+                    'y':  np.zeros(n),
+                    'dn': np.zeros(n),
+                    'shape': n
+                }
 
             elif type == "FC":
 
                 # Get number of neurones
-                n, alpha = data
+                n, alpha, w, b = data
 
-                if self.lInfo[pl][0] == "FC":
-                    nbrIn = len(self.layers[pl])
+                if self.l_info[pl][0] == "FC" or self.l_info[pl][0] == "ReLu2":
+                    inp = prev_out
                 else:
-                    nbrIn = len(self.layers[pl]) *\
-                            len(self.layers[pl][0]) *\
-                            len(self.layers[pl][0][0])
+                    d, n1, n2 = prev_out
+                    inp = d * n1 * n2
 
+                prev_out = n
 
-                # Create the full Connected layer
-                for _ in range(n):
-
-                    # Create New Neurone
-                    self.layers[ll].append(FC(nbrIn, alpha))
+                self.layers[ll] = \
+                {
+                    'x':  np.zeros(inp),
+                    'y':  np.zeros(n),
+                    'dn': np.zeros((n, inp)),
+                    'w':  np.random.uniform(w[0], w[1], (n, inp)),
+                    'b':  np.full(n, b),
+                    'alpha': alpha,
+                    'shape': n
+                }
 
             elif type == "DQN":
 
                 # Get number of neurones
-                n, alpha, gamma = data
+                n, alpha, gamma, w, b = data
 
-                if self.lInfo[pl][0] == "FC":
-                    nbrIn = len(self.layers[pl])
+                if self.l_info[pl][0] == "FC" or self.l_info[pl][0] == "ReLu2":
+                    inp = prev_out
                 else:
-                    nbrIn = len(self.layers[pl]) *\
-                            len(self.layers[pl][0]) *\
-                            len(self.layers[pl][0][0])
+                    d, n1, n2 = prev_out
+                    inp = d * n1 * n2
 
-                # Create the full Connected layer
-                for _ in range(n):
-
-                    # Create New Neurone
-                    self.layers[ll].append(DQN(nbrIn, alpha, gamma))
+                self.layers[ll] = \
+                {
+                    'x':  np.zeros(inp),
+                    'Q':  np.zeros(n),
+                    'dn': np.zeros((n, inp)),
+                    'w':  np.random.uniform(w[0], w[1], (n, inp)),
+                    'b':  np.full(n, b),
+                    'alpha': alpha,
+                    'gamma': gamma,
+                    'shape': n,
+                }
 
         # Copy the network for experiance replay
-        self.replay_layers  = deepcopy(self.layers)
-        self.replay_filters = deepcopy(self.filters)
+        self.rply_layers  = deepcopy(self.layers)
 
-        # Update correctly the filter of the convolutional layers
-        for l in range(len(layers)):
-
-            if type == "Conv":
-
-                _d  = len(self.replay_layers[l])
-                _n1 = len(self.replay_layers[l][0])
-                _n2 = len(self.replay_layers[l][0][0])
-
-                for d in range(_d):
-                    for n1 in range(_n1):
-                        for n2 in range(_n2):
-                                self.replay_layers[ll][d][i].filter = \
-                                        self.replay_filters[ll][d]
-
-        # Creat the array for the output values
+        # Create the array for the output values
         self.Q = None
-
-        # create mutex
-        self.replay_mutex = threading.Lock()
-        self.layers_mutex = threading.Lock()
-
-        # Start thread for experiance replay
-        self.replay_thread = threading.Thread(target=self.experiance_replay)
-        self.replay_thread.start()
 
     def __call__(self, x, r, first, train):
 
+        str = cuda.stream()
+
         if train:
-            return self.train(x, r, first)
+            return self.train(x, r, str, first)
         else:
-            return self.run(x, self.layers)
+            self.a, _ = self.run(x, self.layers, str)
+            return self.a
 
     def nbr_neurones(self, w, f, p, s):
 
@@ -291,369 +519,419 @@ class DQL:
 
     def experiance_replay(self):
 
+        global rply_mutex
+        global layers_mutex
+
+        str = cuda.stream()
+
+        exp = 0
         replay_length = 0
 
-        while replay_length == 0:
-            self.replay_mutex.acquire()
-            replay_length = len(self.replay)
-            self.replay_mutex.release()
+        self.rply_stop = False
 
-        while not self.replay_stop:
+        while not self.rply_stop:
 
-            # Select the experiance to replay based on the number of time it has
-            # been replayed
-            self.replay_mutex.acquire()
-            e    = np.zeros(len(self.replay))
-            prob = np.zeros(len(self.replay))
+            while replay_length == 0 and not agent.rply_stop:
+                rply_mutex.acquire()
+                replay_length = len(self.rply_save)
+                rply_mutex.release()
 
-            # Calculate exponentiel of each value
-            for i in range(len(self.replay)):
-        	       e[i] = np.exp(self.replay.values()[i], dtype=np.float)
+            if agent.rply_stop:
+                return
 
-            prob = e / sum(e)
+            rply_mutex.acquire()
+            if len(self.rply_save) == 0:
+                rply_mutex.release()
+                continue
 
-            exp = np.random.choice(len(self.replay), 1, p=prob.flatten())[0]
-            x ,a, r, xPlus = self.replay.keys()[exp]
-            self.replay[x ,a, r, xPlus] += 1
-            self.replay_mutex.release()
+            exp = np.random.randint(low=0, high=len(self.rply_save))
+            x ,a, r, xPlus = self.rply_save.keys()[exp]
+            self.rply_save[x ,a, r, xPlus] += 1
+            rply_mutex.release()
 
-            # # Get one experiance in the replay list
-            # self.replay_mutex.acquire()
-            # x ,a, r, xPlus =\
-            #         self.replay[np.random.randint(low=0, high=len(self.replay))]
-            # self.replay_mutex.release()
+            print "Experiance chosen: ", exp, self.rply_cnt
 
-            # Calculate the next Q with exploration
-            _, QPlus = self.run(np.asarray(xPlus), self.replay_layers)
-            _, Q     = self.run(np.asarray(x), self.replay_layers)
+            # Calculate the next Q with explorationsel
+            # NOTE: It seems than my grahpic card is not capable to execute
+            #       the kernel in the same time than the main thread.
+            if xPlus is None:
+                QPlus = np.zeros(self.rply_layers[len(self.rply_layers)-1]['shape'])
+            else:
+                layers_mutex.acquire()
+                _, QPlus = self.run(np.asarray(xPlus), self.rply_layers, str)
+                layers_mutex.release()
+            layers_mutex.acquire()
+            _, Q = self.run(np.asarray(x), self.rply_layers, str)
+            layers_mutex.release()
 
-            print "Qplus:", QPlus
-            print "Q:    ", Q
+            print "Q:    ", Q, r
+            print "QPlus:", QPlus, r
 
-            nbrLayers = len(self.replay_layers)
+            nbrLayers = len(self.rply_layers)
 
             # Training
             for l in range(nbrLayers-1, 0, -1):
 
                 # Last layer (DQN)
-                if l == nbrLayers-1:
+                if self.l_info[l][0]  == "DQN":
 
-                    for n in range(len(self.replay_layers[l])):
+                    r_tmp     = np.zeros(self.rply_layers[l]['shape'])
+                    QPlus_tmp = np.zeros(self.rply_layers[l]['shape'])
+                    sel_tmp   = np.zeros(self.rply_layers[l]['shape'])
 
-                        if n == a:
-                            self.replay_layers[l][n].train(max(QPlus), r, 1)
-                        else:
-                            self.replay_layers[l][n].train(0, 0, 0)
+                    r_tmp[a] = r
+                    sel_tmp[a] = 1
+                    QPlus_tmp[a] = max(QPlus)
 
-                # BackPropagation
-                else:
+                    # Move data from host to device
+                    d_dn    = cuda.to_device(self.rply_layers[l]['dn'], str)
+                    d_x     = cuda.to_device(self.rply_layers[l]['x'], str)
+                    d_Q     = cuda.to_device(self.rply_layers[l]['Q'], str)
+                    d_w     = cuda.to_device(self.rply_layers[l]['w'], str)
+                    d_b     = cuda.to_device(self.rply_layers[l]['b'], str)
+                    d_alpha = cuda.to_device(self.rply_layers[l]['alpha'], str)
+                    d_gamma = cuda.to_device(self.rply_layers[l]['gamma'], str)
+                    d_r     = cuda.to_device(r_tmp, str)
+                    d_Qplus = cuda.to_device(QPlus_tmp, str)
+                    d_sel   = cuda.to_device(sel_tmp, str)
 
-                    if self.lInfo[l][0]  == "Conv":
+                    # One thread per element, assuming no more than n < 1024
+                    n = self.rply_layers[l]['shape']
+                    bl = 1
+                    th = n
 
-                        if self.lInfo[l+1][0]  == "FC" or \
-                           self.lInfo[l+1][0]  == "DQN":
-                            pass
+                    dqn_train[bl, th, str](d_dn, d_x, d_Q, d_Qplus, d_r, \
+                                            d_w, d_b, d_alpha, d_gamma, d_sel)
 
-                        elif self.lInfo[l+1][0]  == "ReLu":
+                    # Move data from device to host
+                    d_dn.copy_to_host(self.rply_layers[l]['dn'], str)
+                    d_w.copy_to_host(self.rply_layers[l]['w'], str)
+                    d_b.copy_to_host(self.rply_layers[l]['b'], str)
 
-                            _d  = len(self.replay_layers[l])
-                            _n1 = len(self.replay_layers[l][0])
-                            _n2 = len(self.replay_layers[l][0][0])
+                elif self.l_info[l][0]  == "Conv":
 
-                            for d in range(_d):
-                                for n1 in range(_n1):
-                                    for n2 in range(_n2):
+                    # Move data from host to device
+                    d_dn1   = cuda.to_device(self.rply_layers[l+1]['dn'], str)
+                    d_dn0   = cuda.to_device(self.rply_layers[l]['dn'], str)
+                    d_x     = cuda.to_device(self.rply_layers[l]['x'], str)
+                    d_w     = cuda.to_device(self.rply_layers[l]['w'], str)
+                    d_b     = cuda.to_device(self.rply_layers[l]['b'], str)
+                    d_s     = cuda.to_device(self.rply_layers[l]['f'], str)
+                    d_f     = cuda.to_device(self.rply_layers[l]['s'], str)
+                    d_alpha = cuda.to_device(self.rply_layers[l]['alpha'], str)
 
-                                        dn = self.replay_layers[l+1][d][n1][n2].dn
-                                        self.replay_layers[l][d][n1][n2].back(dn)
+                    # One thread per element, assuming no more than n2 < 1024
+                    d, n1, n2 = self.rply_layers[l]['shape']
+                    bl = (d, n1)
+                    th = n2
 
-                                # Update the weight of the filter
-                                self.replay_filters[l][d].update()
+                    conv_back[bl, th, str](d_dn1, d_dn0, d_x, d_w, d_b, \
+                                                        d_f, d_s, d_alpha)
 
-                        elif self.lInfo[l+1][0]  == "MaxPool": # TODO
-                            pass
+                    # Move data from device to host
+                    d_dn0.copy_to_host(self.rply_layers[l]['dn'], str)
+                    d_w.copy_to_host(self.rply_layers[l]['w'], str)
+                    d_b.copy_to_host(self.rply_layers[l]['b'], str)
 
-                        elif self.lInfo[l+1][0]  == "Conv": # TODO
-                            pass
+                elif self.l_info[l][0]  == "ReLu":
 
-                    elif self.lInfo[l][0]  == "ReLu":
+                    # Move data from host to device
+                    d_dn1   = cuda.to_device(self.rply_layers[l+1]['dn'], str)
+                    d_dn0   = cuda.to_device(self.rply_layers[l]['dn'], str)
+                    d_x     = cuda.to_device(self.rply_layers[l]['x'], str)
+                    d_prev  = cuda.to_device(self.l_info[l+1][0], str)
 
-                        if self.lInfo[l+1][0]  == "FC" or \
-                           self.lInfo[l+1][0]  == "DQN":
+                    # One thread per element, assuming no more than n2 < 1024
+                    d, n1, n2 = self.rply_layers[l]['shape']
+                    bl = (d, n1)
+                    th = n2
 
-                            _d  = len(self.replay_layers[l])
-                            _n1 = len(self.replay_layers[l][0])
-                            _n2 = len(self.replay_layers[l][0][0])
+                    relu_back[bl, th, str](d_dn1, d_dn0, d_x, d_prev)
 
-                            for d in range(_d):
-                                for n1 in range(_n1):
-                                    for n2 in range(_n2):
+                    # Move data from device to host
+                    d_dn0.copy_to_host(self.rply_layers[l]['dn'], str)
 
-                                        # Number of neurones in the next layer
-                                        _nn = len(self.replay_layers[l+1])
+                elif self.l_info[l][0]  == "ReLu2":
 
-                                        # Create/reset the lists
-                                        dn = np.zeros(_nn)
+                    # Move data from host to device
+                    d_dn1   = cuda.to_device(self.rply_layers[l+1]['dn'], str)
+                    d_dn0   = cuda.to_device(self.rply_layers[l]['dn'], str)
+                    d_x     = cuda.to_device(self.rply_layers[l]['x'], str)
 
-                                        # nn = node of next layer
-                                        for nn in range(_nn):
-                                            n = d * _n1 * _n2 + n1 * _n2 + n2
-                                            dn[nn] = self.replay_layers[l+1][nn].dn[n]
+                    # One thread per element, assuming no more than n2 < 1024
+                    n = self.rply_layers[l]['shape']
+                    bl = 1
+                    th = n
 
-                                        self.replay_layers[l][d][n1][n2].back(dn, "FC")
+                    relu2_back[bl, th, str](d_dn1, d_dn0, d_x)
 
-                        elif self.lInfo[l+1][0] == "MaxPool":
+                    # Move data from device to host
+                    d_dn0.copy_to_host(self.rply_layers[l]['dn'], str)
 
-                            dn = np.zeros((len(self.replay_layers[l]), \
-                                            len(self.replay_layers[l][0]), \
-                                            len(self.replay_layers[l][0][0])))
+                elif self.l_info[l][0]  == "FC":
 
-                            _nd  = len(self.replay_layers[l+1])
-                            _nn1 = len(self.replay_layers[l+1][0])
-                            _nn2 = len(self.replay_layers[l+1][0][0])
+                    # Move data from host to device
+                    d_dn1   = cuda.to_device(self.rply_layers[l+1]['dn'], str)
+                    d_dn0   = cuda.to_device(self.rply_layers[l]['dn'], str)
+                    d_x     = cuda.to_device(self.rply_layers[l]['x'], str)
+                    d_w     = cuda.to_device(self.rply_layers[l]['w'], str)
+                    d_b     = cuda.to_device(self.rply_layers[l]['b'], str)
+                    d_alpha = cuda.to_device(self.rply_layers[l]['alpha'], str)
 
-                            for nd in range(_nd):
-                                for nn1 in range(_nn1):
-                                    for nn2 in range(_nn2):
+                    # One thread per element, assuming no more than n < 1024
+                    n = self.rply_layers[l]['shape']
+                    bl = 1
+                    th = n
 
-                                        (_, f, s)   = self.lInfo[l+1][1]
-                                        (x1, x2) = (nn1*s[0], nn1*s[0]+f[0])
-                                        (y1, y2) = (nn2*s[1], nn2*s[1]+f[1])
+                    fc_back[bl, th, str](d_dn1, d_dn0, d_x, d_w, d_b, \
+                                                                    d_alpha)
 
-                                        temp = self.replay_layers[l+1][nd][nn1][nn2].dn
-                                        dn[d, x1:x2, y1:y2] = temp
+                    # Move data from device to host
+                    d_dn0.copy_to_host(self.rply_layers[l]['dn'], str)
+                    d_w.copy_to_host(self.rply_layers[l]['w'], str)
+                    d_b.copy_to_host(self.rply_layers[l]['b'], str)
 
-                            _d  = len(self.replay_layers[l])
-                            _n1 = len(self.replay_layers[l][0])
-                            _n2 = len(self.replay_layers[l][0][0])
-
-                            for d in range(_d):
-                                for n1 in range(_n1):
-                                    for n2 in range(_n2):
-                                        self.replay_layers[l][d][n1][n2].back(dn[d][n1][n2])
-
-                        elif self.lInfo[l+1][0] == "Conv": # TODO padding
-
-                            dn = np.zeros((len(self.replay_layers[l][0]), \
-                                            len(self.replay_layers[l][0][0])))
-
-                            _nd  = len(self.replay_layers[l+1])
-                            _nn1 = len(self.replay_layers[l+1][0])
-                            _nn2 = len(self.replay_layers[l+1][0][0])
-
-                            for nd in range(_nd):
-                                for nn1 in range(_nn1):
-                                    for nn2 in range(_nn2):
-
-                                        (_, _, f, p, s, _) = self.lInfo[l+1][1]
-                                        (x1, x2) = (nn1*s[0], nn1*s[0]+f[0])
-                                        (y1, y2) = (nn2*s[1], nn2*s[1]+f[1])
-
-                                        temp = self.replay_layers[l+1][nd][nn1][nn2].dn
-                                        dn[x1:x2, y1:y2] = np.add(dn[x1:x2, y1:y2],\
-                                                                  temp)
-
-                            _d  = len(self.replay_layers[l])
-                            _n1 = len(self.replay_layers[l][0])
-                            _n2 = len(self.replay_layers[l][0][0])
-
-                            for d in range(_d):
-                                for n1 in range(_n1):
-                                    for n2 in range(_n2):
-                                        self.replay_layers[l][d][n1][n2].back(dn[n1][n2])
-
-                    elif self.lInfo[l][0]  == "MaxPool":
-
-                        if self.lInfo[l+1][0]  == "FC" or \
-                           self.lInfo[l+1][0]  == "DQN":
-
-                            _d  = len(self.replay_layers[l])
-                            _n1 = len(self.replay_layers[l][0])
-                            _n2 = len(self.replay_layers[l][0][0])
-
-                            for d in range(_d):
-                                for n1 in range(_n1):
-                                    for n2 in range(_n2):
-
-                                        # Number of neurones in the next layer
-                                        _nn = len(self.replay_layers[l+1])
-
-                                        # Create/reset the lists
-                                        dn = np.zeros(_nn)
-
-                                        # nn = node of next layer
-                                        for nn in range(_nn):
-                                            n = d * _n1 * _n2 + n1 * _n2 + n2
-                                            dn[nn] = self.replay_layers[l+1][nn].dn[n]
-
-                                        self.replay_layers[l][d][n1][n2].back(dn)
-
-                        elif self.lInfo[l+1][0] == "MaxPool": # TODO
-                            pass
-
-                        elif self.lInfo[l+1][0] == "Conv":  # TODO
-                            pass
-
-                    elif self.lInfo[l][0]  == "FC":
-
-                        if self.lInfo[l+1][0]  == "FC" or \
-                           self.lInfo[l+1][0]  == "DQN":
-
-                            # Number of neurones in the next layer
-                            nLen = len(self.replay_layers[l+1])
-
-                            for n in range(len(self.replay_layers[l])):
-
-                                # Create/reset the lists
-                                dn = np.zeros(nLen)
-
-                                # nn = node of next layer
-                                for nn in range(nLen):
-                                    dn[nn] = self.replay_layers[l+1][nn].dn[n]
-
-                                self.replay_layers[l][n].back(dn, "FC")
+            self.update_counter += 1
+            print "Update Counter:", self.update_counter
 
             # Set an update during the next training session
-            if self.replay_cnt >= self.replay_limit:
+            if self.rply_cnt >= self.rply_limit:
 
-                print "NEW WEIGHT LOAD"
-                self.replay_cnt  = 0
+                print "NEW WEIGHT LOADED"
+                self.rply_cnt  = 0
 
-                self.layers_mutex.acquire()
-                self.layers  = copy(self.replay_layers)
-                self.filters = copy(self.replay_filters)
-                self.layers_mutex.release()
+                layers_mutex.acquire()
+                self.layers = deepcopy(self.rply_layers)
+                layers_mutex.release()
+
+                # # Reset dictionary of experiance
+                # rply_mutex.acquire()
+                # self.rply_save = defaultdict()
+                # replay_length = 0
+                # rply_mutex.release()
+
             else:
-                self.replay_cnt += 1
+                self.rply_cnt += 1
 
-    def train(self, x, r, first):
+    def train(self, x, r, str, first):
+
+        global rply_mutex
+        global layers_mutex
 
         # Save experiance et = (st,at,rt,st+1)
-        if not first:
+        if not first and len(self.rply_save) < self.rply_samples:
 
-            tuple_x     = self.x.tolist()
-            tuple_xPlus = x.tolist()
+            tuple_x = self.x.tolist()
+
+            if x is not None:
+                tuple_xPlus = x.tolist()
 
             # Convert the numpy array to tuple to save them in the dict
             for i in range(len(tuple_x)):
                 tuple_x[i] = tuple(map(tuple, tuple_x[i]))
-                tuple_xPlus[i] = tuple(map(tuple, tuple_xPlus[i]))
-            tuple_x = tuple(map(tuple, tuple_x))
-            tuple_xPlus = tuple(map(tuple, tuple_xPlus))
 
-            if (tuple_x, self.a, r, tuple_xPlus) not in self.replay:
-                self.replay_mutex.acquire()
-                self.replay[tuple_x, self.a, r, tuple_xPlus] = 0
-                self.replay_mutex.release()
+                if x is not None:
+                    tuple_xPlus[i] = tuple(map(tuple, tuple_xPlus[i]))
+
+            tuple_x = tuple(map(tuple, tuple_x))
+
+            if x is not None:
+                tuple_xPlus = tuple(map(tuple, tuple_xPlus))
+            else:
+                tuple_xPlus = None
+
+            if (tuple_x, self.a, r, tuple_xPlus) not in self.rply_save:
+                rply_mutex.acquire()
+                self.rply_save[tuple_x, self.a, r, tuple_xPlus] = 0
+                rply_mutex.release()
+                print "NEW SAMPLES:", len(self.rply_save)
+
+            # rply_mutex.acquire()
+            # self.rply_save[tuple_x, self.a, r, tuple_xPlus] = 0
+            # rply_mutex.release()
+
+        elif not first:
+            rply_mutex.acquire()
+            self.rply_save = defaultdict()
+            replay_length = 0
+            rply_mutex.release()
+
 
         # Select the next action
         self.x = x
 
+        if x is None:
+            return
+
         # Avoid the replay thread to upload the new weight during a pass
-        self.layers_mutex.acquire()
-        self.a, _ = self.run(x, self.layers)
-        self.layers_mutex.release()
+        layers_mutex.acquire()
+        self.a, _ = self.run(x, self.layers, str, True)
+        layers_mutex.release()
 
         return self.a
 
-    def run(self, x, layers):
+    def run(self, x, layers, str, explore=False):
 
         nbrLayers = len(layers)
+
+        l_out = 0
 
         # Parse each layer
         for l in range(nbrLayers):
 
             # Layer's input value
             if l == 0:
-                lIn = x
+                l_in = np.copy(x)
             else:
-                lIn = lOut
+                l_in = np.copy(l_out)
 
             # Layer's output value
-            lOut = np.zeros(np.asarray(layers[l]).shape)
+            l_out = np.zeros(layers[l]['shape'])
 
-            if self.lInfo[l][0] == "DQN":
-                for n in range(len(layers[l])):
-                    lOut[n] = layers[l][n].run(lIn.reshape(-1))
+            if self.l_info[l][0] == "DQN":
 
-            elif self.lInfo[l][0] == "FC":
-                for n in range(len(layers[l])):
-                    lOut[n] = layers[l][n].run(lIn.reshape(-1))
+                layers[l]['x'] = np.copy(l_in.reshape(-1))
 
-            else:   # Conv, ReLu, MaxPool
+                # Move data from host to device
+                d_x = cuda.to_device(layers[l]['x'], str)
+                d_Q = cuda.to_device(layers[l]['Q'], str)
+                d_w = cuda.to_device(layers[l]['w'], str)
+                d_b = cuda.to_device(layers[l]['b'], str)
 
-                _d  = len(layers[l])
-                _n1 = len(layers[l][0])
-                _n2 = len(layers[l][0][0])
+                # One thread per element, assuming no more than n < 1024
+                n = layers[l]['shape']
+                bl = 1
+                th = n
 
-                for d in range(_d):
-                    for n1 in range(_n1):
-                        for n2 in range(_n2):
+                dqn_run[bl, th, str](d_x, d_Q, d_w, d_b)
 
-                            if self.lInfo[l][0] == "Conv": # TODO padding
+                # Move data from device to host
+                d_Q.copy_to_host(layers[l]['Q'], str)
+                l_out = np.copy(layers[l]['Q'])
 
-                                # Determine the input matrix of the neurone
-                                (_, _, f, p, s, _) = self.lInfo[l][1]
-                                (x1, x2) = (n1*s[0], n1*s[0]+f[0])
-                                (y1, y2) = (n2*s[1], n2*s[1]+f[1])
+            elif self.l_info[l][0] == "FC":
 
-                                nIn = lIn[:, x1:x2, y1:y2]
+                layers[l]['x'] = np.copy(l_in.reshape(-1))
 
-                            elif self.lInfo[l][0] == "ReLu":
-                                nIn = lIn[d, n1, n2]
+                # Move data from host to device
+                d_x = cuda.to_device(layers[l]['x'], str)
+                d_y = cuda.to_device(layers[l]['y'], str)
+                d_w = cuda.to_device(layers[l]['w'], str)
+                d_b = cuda.to_device(layers[l]['b'], str)
 
-                            elif self.lInfo[l][0] == "MaxPool":
+                # One thread per element, assuming no more than n < 1024
+                n = layers[l]['shape']
+                bl = 1
+                th = n
 
-                                # Determine the input matrix of the neurone
-                                (_, f, s)   = self.lInfo[l][1]
-                                (x1, x2) = (n1*s[0], n1*s[0]+f[0])
-                                (y1, y2) = (n2*s[1], n2*s[1]+f[1])
+                fc_run[bl, th, str](d_x, d_y, d_w, d_b)
 
-                                nIn = lIn[d, x1:x2, y1:y2]
+                # Move data from device to host
+                d_y.copy_to_host(layers[l]['y'], str)
+                l_out = np.copy(layers[l]['y'])
 
-                            lOut[d, n1, n2] = layers[l][d][n1][n2].run(nIn)
+            if self.l_info[l][0] == "Conv":
 
-        # greedy selection
-        # TODO:
-        greedy = np.full(len(lOut), self.explore/(len(lOut)-1))
-        greedy[np.argmax(lOut)] = 1.0 - self.explore
+                layers[l]['x'] = np.copy(l_in)
 
-        return np.random.choice(len(lOut), 1, p=greedy.flatten())[0], lOut
+                # Move data from host to device
+                d_x = cuda.to_device(layers[l]['x'], str)
+                d_y = cuda.to_device(layers[l]['y'], str)
+                d_w = cuda.to_device(layers[l]['w'], str)
+                d_b = cuda.to_device(layers[l]['b'], str)
+                d_s = cuda.to_device(layers[l]['f'], str)
+                d_f = cuda.to_device(layers[l]['s'], str)
+
+                # One thread per element, assuming no more than n2 < 1024
+                d, n1, n2 = layers[l]['shape']
+                bl = (d, n1)
+                th = n2
+
+                conv_run[bl, th, str](d_x, d_y, d_w, d_b, d_s, d_f)
+
+                # Move data from device to host
+                d_y.copy_to_host(layers[l]['y'], str)
+                l_out = np.copy(layers[l]['y'])
+
+            elif self.l_info[l][0] == "ReLu":
+
+                layers[l]['x'] = np.copy(l_in)
+
+                # Move data from host to device
+                d_x = cuda.to_device(layers[l]['x'], str)
+                d_y = cuda.to_device(layers[l]['y'], str)
+
+                # One thread per element, assuming no more than n2 < 1024
+                d, n1, n2 = layers[l]['shape']
+                bl = (d, n1)
+                th = n2
+
+                relu_run[bl, th, str](d_x, d_y)
+
+                # Move data from device to host
+                d_y.copy_to_host(layers[l]['y'], str)
+                l_out = np.copy(layers[l]['y'])
+
+            elif self.l_info[l][0] == "ReLu2":
+
+                layers[l]['x'] = np.copy(l_in)
+
+                # Move data from host to device
+                d_x = cuda.to_device(layers[l]['x'], str)
+                d_y = cuda.to_device(layers[l]['y'], str)
+
+                # One thread per element, assuming no more than n2 < 1024
+                n = layers[l]['shape']
+                bl = 1
+                th = n
+
+                relu2_run[bl, th, str](d_x, d_y)
+
+                # Move data from device to host
+                d_y.copy_to_host(layers[l]['y'], str)
+                l_out = np.copy(layers[l]['y'])
+
+        # Greedy selection, P(explore) to not choose the given action
+        if explore:
+            e = 10000.0 / (10000.0 + self.explore_cnt)
+            greedy = np.full(len(l_out), e / (len(l_out)-1))
+            greedy[np.argmax(l_out)] = 1.0 - e
+            a = np.random.choice(len(l_out), 1, p=greedy.flatten())[0]
+            self.explore_cnt += 1
+            print "P(explore):", e
+            return a, l_out
+        else:
+            return np.argmax(l_out), l_out
 
 # ------------------------------------------------------------------------------
-
-VERBOSE = True
 
 # General Parameters
 SQUARE_SIZE    = 10
 WINDOW_WIDTH   = 10
-WINDOW_LENGTH  = 10
-WINDOW_COLOR   = (0, 0, 0)#(50, 50, 50)
+WINDOW_HEIGHT  = 10
+WINDOW_COLOR   = (0, 0, 0)
 
-#dql1 = 1e-8, 1e-8, 5e-2, 5e-1
-
-DQL_EXPLORE = 9e-1
-CONV_ALPHA  = 1e-6
-FC_ALPHA    = 1e-6
-DQN_ALPHA   = 5e-1
-DQN_GAMMA   = 5e-1
+CONV_ALPHA  = 1e-3
+FC_ALPHA    = 1e-3
+DQN_ALPHA   = 1e-3
+DQN_GAMMA   = 9e-1
 TRAINING    = True
 
-MOVE_REWARD_POS  =  0.1 # Reward for good move
-MOVE_REWARD_NEG  = -0.1 # Reward for bad move
-LOSE_REWARD      = -1
-FRUIT_REWARD     = 10
+MOVE_REWARD_POS  = -1e-1#2e-3#0# 1e-3 # Reward for good move
+MOVE_REWARD_NEG  = -1e-1#-1e-3#0#-1e-3 # Reward for bad move
+LOSE_REWARD      = -1e-0#-5#-1e-1
+FRUIT_REWARD     =  2e-0#5# 1e-1
 
-ACTION_TIME      = 1 #ms
+ACTION_TIME      = 500 #ms
 
-FRUIT_COLOR  = (255, 0, 0)#(225, 80, 50)
+FRUIT_COLOR  = (255, 255, 255)
 
 SNAKE_INIT_LENGTH = 5 # SQUARES
 SNAKE_GROWING     = 1 # SQUARES
 SNAKE_INIT_POSX   = WINDOW_WIDTH  / 2 # SQUARES
-SNAKE_INIT_POSY   = WINDOW_LENGTH / 2 # SQUARES
-SNAKE_COLOR       = (100, 0, 0) #(226, 226, 226)
-SNAKE_COLOR_HEAD  = (150, 0, 0)
+SNAKE_INIT_POSY   = WINDOW_HEIGHT / 2 # SQUARES
+SNAKE_COLOR       = (0, 100, 0)
+SNAKE_COLOR_HEAD  = (0, 200, 0)
 
 INIT_DIRECTION = "UP"
 
@@ -668,8 +946,6 @@ DIRS_ACTION = {"UP":    [ "RIGHT",      "LEFT",         "UP"],
                "DOWN":  [ "LEFT",       "RIGHT",        "DOWN"],
                "LEFT":  [ "UP",         "DOWN",         "LEFT"],
                "RIGHT": [ "DOWN",       "UP",           "RIGHT"]}
-
-# MOVE = ["TURN_RIGHT", "TURN_LEFT", "STAY_STRAIGHT"]
 
 EVENT = {
     "TIMER":    USEREVENT + 0,
@@ -728,26 +1004,26 @@ class Snake:
 
         # Check if the snake went out of the window
         if self.body[0][0] < 0:
-            print "Snake left wall"
+            # --print "Snake left wall"
             return False
 
         elif self.body[0][0] >= WINDOW_WIDTH  * SQUARE_SIZE:
-            print "Snake right wall"
+            # --print "Snake right wall"
             return False
 
         elif self.body[0][1] < 0:
-            print "Snake bottom walls"
+            # --print "Snake bottom walls"
             return False
 
-        elif self.body[0][1] >= WINDOW_LENGTH * SQUARE_SIZE:
-            print "Snake top wall"
+        elif self.body[0][1] >= WINDOW_HEIGHT * SQUARE_SIZE:
+            # --print "Snake top wall"
             return False
 
         # Check if snake eats itself
         for i in range(len(self.body)-1):
             if self.body[0][0] == self.body[i+1][0] and\
                self.body[0][1] == self.body[i+1][1]:
-               print "Snake ate itself"
+               # --print "Snake ate itself"
                return False
 
         return True
@@ -767,7 +1043,7 @@ class Snake:
                     WINDOW_WIDTH * SQUARE_SIZE\
             or self.body[0][1] + (dir[1] * SQUARE_SIZE) < 0\
             or self.body[0][1] + (dir[1] * SQUARE_SIZE) >= \
-                    WINDOW_LENGTH * SQUARE_SIZE:
+                    WINDOW_HEIGHT * SQUARE_SIZE:
                 wall[a] = 1
 
         return wall
@@ -838,7 +1114,7 @@ class Fruit:
 
     def newPosition(self):
         self.posx = SQUARE_SIZE * randint(0, WINDOW_WIDTH-1)
-        self.posy = SQUARE_SIZE * randint(0, WINDOW_LENGTH-1)
+        self.posy = SQUARE_SIZE * randint(0, WINDOW_HEIGHT-1)
 
         # Check if the new fruit is on the position than the snake
         for i in range(len(self.snake.body)):
@@ -879,11 +1155,24 @@ def getReward(snake, fruit):
 def getState(snake, fruit):
 
     surface  = pygame.display.get_surface()
-    shape    = pygame.surfarray.pixels_red(surface).shape
-    state    = np.zeros((1, shape[0], shape[0]))
-    state[0] = pygame.surfarray.pixels_red(surface)
-    # state[0] = np.divide(pygame.surfarray.pixels_red(surface, \
-    #                      np.max((np.max(state), 1))))
+    # shape    = pygame.surfarray.pixels_red(surface).shape
+    # state    = np.zeros((3, shape[0], shape[0]))
+    # state[0] = pygame.surfarray.pixels_red(surface)
+    # state[1] = pygame.surfarray.pixels_green(surface)
+    # state[2] = pygame.surfarray.pixels_blue(surface)
+    # state[0] = np.divide(state[0], np.max((np.max(state), 1)) * 100)
+
+    surface  = pygame.display.get_surface()
+    # shape    = pygame.surfarray.pixels_red(surface).shape
+    state    = np.zeros((3, WINDOW_WIDTH, WINDOW_HEIGHT))
+    color = [pygame.surfarray.pixels_red(surface),\
+             pygame.surfarray.pixels_green(surface),\
+             pygame.surfarray.pixels_blue(surface)]
+
+    for i in range(3):
+        for x in range(WINDOW_WIDTH):
+            for y in range(WINDOW_HEIGHT):
+                state[i, x, y] = color[i][x*SQUARE_SIZE][y*SQUARE_SIZE]
 
     return state
 
@@ -923,6 +1212,10 @@ def run(agent, snake, fruit):
             print("Quit")
             pygame.quit()
 
+        # Timer to move
+        elif event.type is not EVENT["TIMER"]:
+            continue
+
         # Perform action recommended by the agent
         snake.newDir(action)
 
@@ -944,7 +1237,7 @@ def run(agent, snake, fruit):
             state_cnt += 1
 
             # Add the final losing state
-            agent(state, rewards, False, TRAINING)
+            agent(None, rewards, False, TRAINING)
 
             return False
 
@@ -972,75 +1265,82 @@ def run(agent, snake, fruit):
         action = DIRS_ACTION[action][next]
 
         print "state cnt:", state_cnt, "action:", DIRS_ACTION[action][next], \
-        "rewards:", rewards
+                                                            "rewards:", rewards
         state_cnt += 1
 
 if __name__ == "__main__":
 
     # Create the Deep Q Learning, w = input
-    # Conv    -> (depth, inShape, fShape, padding, stride, alpha)
+    # Conv    -> (depth, input, filter, padding, stride, alpha)
     # ReLu    -> ()
-    # MaxPool -> (inShape, fShape, stride)
-    # DQN     -> (nbrN, alpha, gamma)
+    # FC      -> (neurones, alpha, gamma)
+    # DQN     -> (neurones, alpha, gamma)
 
     # (w - f + 2 * p) / s + 1 = number of neurones along each row
 
-    w1 = (WINDOW_WIDTH * SQUARE_SIZE, WINDOW_WIDTH * SQUARE_SIZE)
-    f1 = (4, 4)
-    s1 = (2, 2)
+    in1 = (WINDOW_WIDTH, WINDOW_HEIGHT)
+    f1 = (2, 2)
+    s1 = (1, 1)
     p1 = (0, 0)
-    d1 = 4
+    d1 = 32
+    w1 = (-0.01, 0.01)
+    b1 = 0.00
 
-    w2 = (49, 49)
-    f2 = (7, 7)
-    s2 = (6, 6)
+    in2 = (8, 8)
+    f2 = (2, 2)
+    s2 = (1, 1)
     p2 = (0, 0)
-    d2 = 4
+    d2 = 64
+    w2 = (-0.01, 0.01)
+    b2 = 0.00
 
-    w3 = (8, 8)
+    in3 = (6, 6)
     f3 = (2, 2)
     s3 = (2, 2)
     p3 = (0, 0)
-    d3 = 4
+    d3 = 64
+    w3 = (-0.00, 0.01)
+    b3 = 0.00
 
-    # w4 = (12, 12)
-    # f4 = (4, 4)
-    # s4 = (2, 2)
-    # p4 = (0, 0)
-    # d4 = 64
+    n4 = 512
+    w4 = (-0.00, 0.01)
+    b4 = 0.00
 
-    n5 = 16
-    # n6 = 512
-    # n7 = 256
-    n8 = 3
-
+    n5 = 3
+    w5 = (-0.00, 0.01)
+    b5 = 0.00
 
     l = [
-            ("Conv",     (d1, w1, f1, p1, s1, CONV_ALPHA)),
+            ("Conv",     (d1, in1, f1, p1, s1, CONV_ALPHA, w1, b1)),
             ("ReLu",     ()),
-            ("Conv",     (d2, w2, f2, p2, s2, CONV_ALPHA)),
+            ("Conv",     (d2, in2, f2, p2, s2, CONV_ALPHA, w2, b2)),
             ("ReLu",     ()),
-            ("Conv",     (d3, w3, f3, p3, s3, CONV_ALPHA)),
+            ("Conv",     (d3, in3, f3, p3, s3, CONV_ALPHA, w3, b3)),
             ("ReLu",     ()),
-            # ("Conv",     (d4, w4, f4, p4, s4, CONV_ALPHA)),
-            # ("ReLu",     ()),
-            ("FC",       (n5, FC_ALPHA)),
-            # ("FC",       (n6, FC_ALPHA)),
-            # ("FC",       (n7, FC_ALPHA)),
-            ("DQN",      (n8, DQN_ALPHA, DQN_GAMMA)),
+            ("FC",       (n4, FC_ALPHA, w4, b4)),
+            ("ReLu2",     ()),
+            ("DQN",      (n5, DQN_ALPHA, DQN_GAMMA, w5, b5)),
         ]
 
-    agent = DQL(l, (1, WINDOW_WIDTH  * SQUARE_SIZE,
-                       WINDOW_LENGTH * SQUARE_SIZE), DQL_EXPLORE)
-    print "DQL created"
-    print("AI initialized")
+    try:
+        agent = pickle.load(open('saving/dql', 'rb'))
+        print "DQL reloaded"
+    except:
+        agent = DQL(l)
+        print "DQL created"
+
+    # Thread for experiance replay
+    if TRAINING:
+        replay_thread = threading.Thread(target=agent.experiance_replay)
+        replay_thread.daemon = True
+        replay_thread.start()
 
     # init Pygame
     pygame.init()
 
     # initialize window
     window = pygame.display.set_mode((WINDOW_WIDTH  * SQUARE_SIZE,
-                                      WINDOW_LENGTH * SQUARE_SIZE))
+                                      WINDOW_HEIGHT * SQUARE_SIZE))
     window.fill(WINDOW_COLOR)
 
     # Title of the window
@@ -1056,9 +1356,9 @@ if __name__ == "__main__":
     clk = pygame.time.Clock()
     pygame.time.set_timer(EVENT["TIMER"], ACTION_TIME)
 
-    print("Game initialized")
-
     game_cnt = 0
+
+    print("Game initialized")
 
     # Loop til doomsday
     while True:
@@ -1082,3 +1382,18 @@ if __name__ == "__main__":
 
         # Update display on screen
         pygame.display.flip()
+
+        # Save the object each 100 trials
+        if game_cnt % 100 == 0 and TRAINING:
+
+            agent.rply_stop = True
+            replay_thread.join()
+            pickle.dump(agent, open('saving/dql','wb'))
+            agent.rply_stop = False
+
+            print "Agent saved"
+
+            # Restart Thread
+            replay_thread = threading.Thread(target=agent.experiance_replay)
+            replay_thread.daemon = True
+            replay_thread.start()
