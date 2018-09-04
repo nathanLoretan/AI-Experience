@@ -19,7 +19,7 @@ from pygame.locals import *
 import matplotlib.pyplot as plt
 from collections import defaultdict
 
-# Rectified l_inear Unit Neurone ================================================
+# Rectified l_inear Unit Neurone ===============================================
 
 # x  = input, real number
 # y  = output, real number
@@ -40,6 +40,7 @@ from collections import defaultdict
 #     n = nth node of l+1
 #     j = jth node of l == jth connection of node n == current node
 
+# If next layer is DQN or FC
 @cuda.jit
 def relu_back(dn1, dn0, x, prev="FC"):
 
@@ -72,6 +73,7 @@ def relu_run(x, y):
 
     y[d, n1, n2] = max(0, x[d, n1, n2])
 
+# If next layer is Conv
 @cuda.jit
 def relu2_back(dn1, dn0, x):
 
@@ -221,7 +223,7 @@ def fc_run(x, y, w, b):
 # 4th Neurone: dE/dy11 * w00, dE/dy11 * w01, dE/dy11 * w10, dE/dy11 * w11
 
 @cuda.jit
-def conv_back(dn1, dn0, x, w, b, s, f, alpha):
+def conv_back(dn1, dn0, x, w, dw, b, s, f, alpha):
 
     d  = cuda.blockIdx.x
     n1 = cuda.blockIdx.y
@@ -232,18 +234,25 @@ def conv_back(dn1, dn0, x, w, b, s, f, alpha):
     s1, s2 = s
     f1, f2 = f
 
-    b[d, n1, n2] -= alpha[0] * dn1[d, n1, n2]
+    # b[d, n1, n2] -= alpha[0] * dn1[d, n1, n2]
+    # for _d in range(d):
     for _d in range(len(x)):
         for _f1 in range(f1):
             for _f2 in range(f2):
-                w[d][_f1][_f2] -= \
+                dw[d, n1, n2, _f1, _f2] = \
                     alpha[0] * dn1[d, n1, n2] * x[_d, n1*s1 + _f1, n2*s2 + _f2]
+                dn0[d, n1, n2, n1*s1 + _f1, n2*s2 + _f2] = \
+                                                    dn1[d, n1, n2] * w[d, _f1, _f2]
+#                w[d, _f1, _f2] -= \
+#                    alpha[0] * dn1[d, n1, n2] * x[_d, n1*s1 + _f1, n2*s2 + _f2]
 
-    cuda.syncthreads()
+#    cuda.syncthreads()
 
-    for _f1 in range(f1):
-        for _f2 in range(f2):
-            dn0[n1*s1 + _f1, n2*s2 + _f2] += dn1[d, n1, n2] * w[d][_f1][_f2]
+    # for _f1 in range(f1):
+    #     for _f2 in range(f2):
+    #         dn0[d, n1, n2, n1*s1 + _f1, n2*s2 + _f2] = \
+    #                                             dn1[d, n1, n2] * w[d, _f1, _f2]
+#            dn0[n1*s1 + _f1, n2*s2 + _f2] += dn1[d, n1, n2] * w[d, _f1, _f2]
 
 @cuda.jit
 def conv_run(x, y, w, b, s, f):
@@ -266,7 +275,8 @@ def conv_run(x, y, w, b, s, f):
                 sum += x[_d, n1*s1 + _f1, n2*s2 + _f2] * w[d, _f1, _f2]
 
     # Multiply the input by the filter
-    y[d, n1, n2] = b[d, n1, n2] + sum
+    # y[d, n1, n2] = b[d, n1, n2] + sum
+    y[d, n1, n2] = b[d] + sum
 
 # Deep Q Neurone ===============================================================
 
@@ -340,6 +350,9 @@ def dqn_run(x, Q, w, b):
 layers_mutex = threading.Lock()
 rply_mutex = threading.Lock()
 
+# Let the replay dictionary outside of the object to not save it with pickle
+rply_save = defaultdict()
+
 class DQL:
     """Convolutional Neural Network"""
 
@@ -359,14 +372,12 @@ class DQL:
     a = 0       # Save action for experiance replay
     x = None    # Save state for experiance replay
 
-    rply_save = defaultdict()
     rply_limit    = 1000
     rply_samples  = 10000
     rply_stop     = False
     rply_cnt      = 0
 
     update_counter = 0
-
     explore_cnt = 0
 
     def __init__(self, layers):
@@ -406,7 +417,8 @@ class DQL:
                     'y':  np.zeros((d, n1, n2)),
                     'dn': np.zeros((inp[0], inp[0])),
                     'w':  np.random.uniform(w[0], w[1], (d, f[0], f[1])),
-                    'b':  np.full((d, n1, n2), b),
+                    # 'b':  np.full((d, n1, n2), b),
+                    'b':  np.full((d), b),
                     's':  s,
                     'f':  f,
                     'alpha': alpha,
@@ -519,6 +531,7 @@ class DQL:
 
     def experiance_replay(self):
 
+        global rply_save
         global rply_mutex
         global layers_mutex
 
@@ -533,20 +546,21 @@ class DQL:
 
             while replay_length == 0 and not agent.rply_stop:
                 rply_mutex.acquire()
-                replay_length = len(self.rply_save)
+                replay_length = len(rply_save)
                 rply_mutex.release()
 
             if agent.rply_stop:
                 return
 
             rply_mutex.acquire()
-            if len(self.rply_save) == 0:
+            if len(rply_save) == 0:
                 rply_mutex.release()
                 continue
 
-            exp = np.random.randint(low=0, high=len(self.rply_save))
-            x ,a, r, xPlus = self.rply_save.keys()[exp]
-            self.rply_save[x ,a, r, xPlus] += 1
+            # Get an experiance randomly
+            exp = np.random.randint(low=0, high=len(rply_save))
+            x ,a, r, xPlus = rply_save.keys()[exp]
+            rply_save[x ,a, r, xPlus] += 1
             rply_mutex.release()
 
             print "Experiance chosen: ", exp, self.rply_cnt
@@ -570,7 +584,7 @@ class DQL:
             nbrLayers = len(self.rply_layers)
 
             # Training
-            for l in range(nbrLayers-1, 0, -1):
+            for l in range(nbrLayers-1, -1, -1):
 
                 # Last layer (DQN)
                 if self.l_info[l][0]  == "DQN":
@@ -582,6 +596,9 @@ class DQL:
                     r_tmp[a] = r
                     sel_tmp[a] = 1
                     QPlus_tmp[a] = max(QPlus)
+
+                    # DEBUG:
+                    self.rply_layers[l]['alpha'] = DQN_ALPHA
 
                     # Move data from host to device
                     d_dn    = cuda.to_device(self.rply_layers[l]['dn'], str)
@@ -610,28 +627,66 @@ class DQL:
 
                 elif self.l_info[l][0]  == "Conv":
 
+                    d, n1, n2  = self.rply_layers[l]['shape']
+                    _, f1, f2  = self.rply_layers[l]['w'].shape
+                    inp1, inp2 = self.rply_layers[l]['dn'].shape
+
+                    dw   = np.zeros((d, n1, n2, f1, f2))
+                    dn0 = np.zeros((d, n1, n2, inp1, inp2))
+
+                    # DEBUG:
+                    self.rply_layers[l]['alpha'] = CONV_ALPHA
+
                     # Move data from host to device
+                    d_dw    = cuda.to_device(dw, str)
+                    d_dn0   = cuda.to_device(dn0, str)
                     d_dn1   = cuda.to_device(self.rply_layers[l+1]['dn'], str)
-                    d_dn0   = cuda.to_device(self.rply_layers[l]['dn'], str)
+                   # d_dn0   = cuda.to_device(self.rply_layers[l]['dn'], str)
                     d_x     = cuda.to_device(self.rply_layers[l]['x'], str)
                     d_w     = cuda.to_device(self.rply_layers[l]['w'], str)
                     d_b     = cuda.to_device(self.rply_layers[l]['b'], str)
-                    d_s     = cuda.to_device(self.rply_layers[l]['f'], str)
-                    d_f     = cuda.to_device(self.rply_layers[l]['s'], str)
+                    d_s     = cuda.to_device(self.rply_layers[l]['s'], str)
+                    d_f     = cuda.to_device(self.rply_layers[l]['f'], str)
                     d_alpha = cuda.to_device(self.rply_layers[l]['alpha'], str)
 
                     # One thread per element, assuming no more than n2 < 1024
-                    d, n1, n2 = self.rply_layers[l]['shape']
                     bl = (d, n1)
                     th = n2
 
-                    conv_back[bl, th, str](d_dn1, d_dn0, d_x, d_w, d_b, \
-                                                        d_f, d_s, d_alpha)
+                    conv_back[bl, th, str](d_dn1, d_dn0, d_x, d_w, d_dw, d_b, \
+                                                        d_s, d_f, d_alpha)
 
                     # Move data from device to host
-                    d_dn0.copy_to_host(self.rply_layers[l]['dn'], str)
-                    d_w.copy_to_host(self.rply_layers[l]['w'], str)
+                   # d_dn0.copy_to_host(self.rply_layers[l]['dn'], str)
+                   # d_w.copy_to_host(self.rply_layers[l]['w'], str)
+                    d_dn0.copy_to_host(dn0, str)
+                    d_dw.copy_to_host(dw, str)
                     d_b.copy_to_host(self.rply_layers[l]['b'], str)
+
+                    for _d in range(d):
+                        self.layers[l]['b'][_d] -= self.layers[l]['alpha'] * \
+                                        np.sum(self.layers[l+1]['dn'][_d, : , :])
+
+                    for _d in range(d):
+                        for _f1 in range(f1):
+                            for _f2 in range(f2):
+                                self.rply_layers[l]['w'][_d, _f1, _f2] -= \
+                                                np.sum(dw[_d, :, :, _f1, _f2])
+
+                    if l == 0:
+                        continue
+
+                    self.layers[l]['dn'] = np.zeros(self.layers[l]['dn'].shape)
+
+                    for _d in range(d):
+                        for _n1 in range(n1):
+                            for _n2 in range(n2):
+                                self.layers[l]['dn'] += dn0[_d, _n1, _n2]
+
+                    # for _i1 in range(inp1):
+                    #     for _i2 in range(inp2):
+                    #         self.rply_layers[l]['dn'][_i1, _i2] += \
+                    #                             np.sum(dn0[:, :, :, _i1, _i2])
 
                 elif self.l_info[l][0]  == "ReLu":
 
@@ -670,6 +725,9 @@ class DQL:
 
                 elif self.l_info[l][0]  == "FC":
 
+                    # DEBUG:
+                    self.rply_layers[l]['alpha'] = FC_ALPHA
+
                     # Move data from host to device
                     d_dn1   = cuda.to_device(self.rply_layers[l+1]['dn'], str)
                     d_dn0   = cuda.to_device(self.rply_layers[l]['dn'], str)
@@ -706,7 +764,7 @@ class DQL:
 
                 # # Reset dictionary of experiance
                 # rply_mutex.acquire()
-                # self.rply_save = defaultdict()
+                # rply_save = defaultdict()
                 # replay_length = 0
                 # rply_mutex.release()
 
@@ -715,11 +773,12 @@ class DQL:
 
     def train(self, x, r, str, first):
 
+        global rply_save
         global rply_mutex
         global layers_mutex
 
         # Save experiance et = (st,at,rt,st+1)
-        if not first and len(self.rply_save) < self.rply_samples:
+        if not first and len(rply_save) < self.rply_samples:
 
             tuple_x = self.x.tolist()
 
@@ -740,22 +799,22 @@ class DQL:
             else:
                 tuple_xPlus = None
 
-            if (tuple_x, self.a, r, tuple_xPlus) not in self.rply_save:
+            if (tuple_x, self.a, r, tuple_xPlus) not in rply_save:
                 rply_mutex.acquire()
-                self.rply_save[tuple_x, self.a, r, tuple_xPlus] = 0
+                rply_save[tuple_x, self.a, r, tuple_xPlus] = 0
                 rply_mutex.release()
-                print "NEW SAMPLES:", len(self.rply_save)
+                print "NEW SAMPLES:", len(rply_save)
 
             # rply_mutex.acquire()
-            # self.rply_save[tuple_x, self.a, r, tuple_xPlus] = 0
+            # rply_save[tuple_x, self.a, r, tuple_xPlus] = 0
             # rply_mutex.release()
 
-        elif not first:
-            rply_mutex.acquire()
-            self.rply_save = defaultdict()
-            replay_length = 0
-            rply_mutex.release()
-
+        # # Reset experiance dictionary
+        # elif not first:
+        #     rply_mutex.acquire()
+        #     rply_save = defaultdict()
+        #     replay_length = 0
+        #     rply_mutex.release()
 
         # Select the next action
         self.x = x
@@ -830,7 +889,7 @@ class DQL:
                 d_y.copy_to_host(layers[l]['y'], str)
                 l_out = np.copy(layers[l]['y'])
 
-            if self.l_info[l][0] == "Conv":
+            elif self.l_info[l][0] == "Conv":
 
                 layers[l]['x'] = np.copy(l_in)
 
@@ -839,8 +898,8 @@ class DQL:
                 d_y = cuda.to_device(layers[l]['y'], str)
                 d_w = cuda.to_device(layers[l]['w'], str)
                 d_b = cuda.to_device(layers[l]['b'], str)
-                d_s = cuda.to_device(layers[l]['f'], str)
-                d_f = cuda.to_device(layers[l]['s'], str)
+                d_s = cuda.to_device(layers[l]['s'], str)
+                d_f = cuda.to_device(layers[l]['f'], str)
 
                 # One thread per element, assuming no more than n2 < 1024
                 d, n1, n2 = layers[l]['shape']
@@ -893,7 +952,7 @@ class DQL:
 
         # Greedy selection, P(explore) to not choose the given action
         if explore:
-            e = 10000.0 / (10000.0 + self.explore_cnt)
+            e = 5000.0 / (5000.0 + self.explore_cnt)
             greedy = np.full(len(l_out), e / (len(l_out)-1))
             greedy[np.argmax(l_out)] = 1.0 - e
             a = np.random.choice(len(l_out), 1, p=greedy.flatten())[0]
@@ -912,15 +971,15 @@ WINDOW_HEIGHT  = 10
 WINDOW_COLOR   = (0, 0, 0)
 
 CONV_ALPHA  = 1e-3
-FC_ALPHA    = 1e-3
-DQN_ALPHA   = 1e-3
+FC_ALPHA    = 1e-2
+DQN_ALPHA   = 1e-2
 DQN_GAMMA   = 9e-1
 TRAINING    = True
 
-MOVE_REWARD_POS  = -1e-1#2e-3#0# 1e-3 # Reward for good move
-MOVE_REWARD_NEG  = -1e-1#-1e-3#0#-1e-3 # Reward for bad move
-LOSE_REWARD      = -1e-0#-5#-1e-1
-FRUIT_REWARD     =  2e-0#5# 1e-1
+MOVE_REWARD_POS  =  1e-2 # Reward for good move
+MOVE_REWARD_NEG  = -1e-2 # Reward for bad move
+LOSE_REWARD      = -5e-1
+FRUIT_REWARD     =  5e-1
 
 ACTION_TIME      = 500 #ms
 
@@ -1299,15 +1358,15 @@ if __name__ == "__main__":
     s3 = (2, 2)
     p3 = (0, 0)
     d3 = 64
-    w3 = (-0.00, 0.01)
+    w3 = (-0.01, 0.01)
     b3 = 0.00
 
     n4 = 512
-    w4 = (-0.00, 0.01)
+    w4 = (-0.1, 0.1)
     b4 = 0.00
 
     n5 = 3
-    w5 = (-0.00, 0.01)
+    w5 = (-0.1, 0.1)
     b5 = 0.00
 
     l = [
