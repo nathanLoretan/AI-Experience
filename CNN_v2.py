@@ -43,7 +43,7 @@ def relu_back(dn1, dn0, x):
     ln2 = cuda.blockDim.x
     ln1 = cuda.gridDim.y
 
-    if x[d, n1, n2] < 0:
+    if x[d, n1, n2] <= 0:
         dn0[d, n1, n2] = 0
     else:
         dn0[d, n1, n2] = dn1[n1, n2]
@@ -59,7 +59,7 @@ def relu2_back(dn1, dn0, x):
     ln2 = cuda.blockDim.x
     ln1 = cuda.gridDim.y
 
-    if x[d, n1, n2] < 0:
+    if x[d, n1, n2] <= 0:
         dn0[d, n1, n2] = 0
     else:
         dn0[d, n1, n2] =  dn1[d, n1, n2]
@@ -293,18 +293,8 @@ def softmax_train(y, t):
     return y - t
 
 def softmax_run(x):
-
-    y = np.zeros(x.shape)
-    e = np.zeros(x.shape)
-    max = np.max(x)
-
-    # Calculate exponentiel of each value
-    for i in range(len(x)):
-	       e[i] = np.exp(x[i], dtype=np.float)
-
-    y = e / np.sum(e)
-
-    return y
+   e = np.exp(x, dtype=np.float)
+   return e / np.sum(e)
 
 # MaxPool Neurone ==============================================================
 
@@ -373,11 +363,11 @@ def max_run(x, y, p, i):
         for _p2 in range(p2):
 
             if _p1 == 0 and _p2 == 0:
-                max = x[d, n1 + _p1, n2 + _p2]
+                max = x[d, n1*p1 + _p1, n2*p2 + _p2]
                 i[d, n1, n2] = (_p1, _p2)
 
-            elif max < x[d, n1 + _p1, n2 + _p2]:
-                max = x[d, n1 + _p1, n2 + _p2]
+            elif max < x[d, n1*p1 + _p1, n2*p2 + _p2]:
+                max = x[d, n1*p1 + _p1, n2*p2 + _p2]
                 i[d, n1, n2] = (_p1, _p2)
 
     y[d, n1, n2] = max
@@ -429,9 +419,9 @@ class CNN:
                 {
                     'x':  np.zeros((d, inp[0], inp[1])),
                     'y':  np.zeros((d, n1, n2)),
-                    'dn': np.zeros((inp[0], inp[0])),
+                    'dn': np.zeros((inp[0], inp[1])),
                     'w':  np.random.uniform(w[0], w[1], (d, f[0], f[1])),
-                    'b':  np.full((d), b),
+                    'b':  np.full(d, b),
                     's':  s,
                     'f':  f,
                     'alpha': alpha,
@@ -462,8 +452,6 @@ class CNN:
 
                 prev_out = (d, n1, n2)
 
-                # Each depth of the layer has one filter which is common to all
-                # the neurones of the depth. The bias is part of the class Filter
                 self.layers[ll] = \
                 {
                     'x':  np.zeros((d, inp[0], inp[1])),
@@ -479,11 +467,8 @@ class CNN:
                 # Get number of neurones
                 n, alpha, w, b = data
 
-                if self.l_info[pl][0] == "FC":
-                    inp = prev_out
-                else:
-                    d, n1, n2 = prev_out
-                    inp = d * n1 * n2
+                d, n1, n2 = prev_out
+                inp = d * n1 * n2
 
                 prev_out = n
 

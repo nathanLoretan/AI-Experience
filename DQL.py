@@ -19,7 +19,7 @@ from pygame.locals import *
 import matplotlib.pyplot as plt
 from collections import defaultdict
 
-# Rectified l_inear Unit Neurone ===============================================
+# Rectified linear Unit Neurone ================================================
 
 # x  = input, real number
 # y  = output, real number
@@ -40,29 +40,21 @@ from collections import defaultdict
 #     n = nth node of l+1
 #     j = jth node of l == jth connection of node n == current node
 
-# If next layer is DQN or FC
+# If next layer is Conv
 @cuda.jit
-def relu_back(dn1, dn0, x, prev="FC"):
+def relu_back(dn1, dn0, x):
 
     d  = cuda.blockIdx.x
     n1 = cuda.blockIdx.y
     n2 = cuda.threadIdx.x
 
-    ln2 = cuda.blockDim.x
-    ln1 = cuda.gridDim.y
+    # ln2 = cuda.blockDim.x
+    # ln1 = cuda.gridDim.y
 
-    temp = 0
-
-    if prev[0] is "FC":
-        for i in range(len(dn1)):
-            temp += dn1[i, d * ln1 * ln2 + n1 * ln2 + n2]
-    else:
-        temp = dn1[n1, n2]
-
-    if x[d, n1, n2] < 0:
+    if x[d, n1, n2] <= 0:
         dn0[d, n1, n2] = 0
     else:
-        dn0[d, n1, n2] = temp
+        dn0[d, n1, n2] = dn1[n1, n2]
 
 @cuda.jit
 def relu_run(x, y):
@@ -73,7 +65,7 @@ def relu_run(x, y):
 
     y[d, n1, n2] = max(0, x[d, n1, n2])
 
-# If next layer is Conv
+# If next layer is DQN or FC
 @cuda.jit
 def relu2_back(dn1, dn0, x):
 
@@ -84,7 +76,7 @@ def relu2_back(dn1, dn0, x):
     for i in range(len(dn1)):
         temp += dn1[i, n]
 
-    if x[n] < 0:
+    if x[n] <= 0:
         dn0[n] = 0
     else:
         dn0[n] = temp
@@ -208,13 +200,15 @@ def fc_run(x, y, w, b):
 #           + -----------------------------------------------------------
 #              dE/dw00      , dE/dw01      , dE/dw10      , dE/dw11
 #
-# Delta node:
+# Delta node: dE/dx
 # -----------
 # dnij = full_conv(dE/dyij * w.T)
 #
 # dn00 = dE/dy00 * w00
 # dn01 = dE/dy00 * w01 + dE/dy01 * w00
 # dn02 =               + dE/dy01 * w01
+# dn10 = dE/dy00 * w10 + dE/dy10 * w00
+# dn11 = dE/dy00 * w11 + dE/dy10 * w01 + dE/dy01 * w10 + dE/dy11 * w00
 #
 # But a neurone get only one dE/dyij corresponding to its output. Hence:
 # 1st Neurone: dE/dy00 * w00, dE/dy00 * w01, dE/dy00 * w10, dE/dy00 * w11
@@ -243,16 +237,6 @@ def conv_back(dn1, dn0, x, w, dw, b, s, f, alpha):
                     alpha[0] * dn1[d, n1, n2] * x[_d, n1*s1 + _f1, n2*s2 + _f2]
                 dn0[d, n1, n2, n1*s1 + _f1, n2*s2 + _f2] = \
                                                     dn1[d, n1, n2] * w[d, _f1, _f2]
-#                w[d, _f1, _f2] -= \
-#                    alpha[0] * dn1[d, n1, n2] * x[_d, n1*s1 + _f1, n2*s2 + _f2]
-
-#    cuda.syncthreads()
-
-    # for _f1 in range(f1):
-    #     for _f2 in range(f2):
-    #         dn0[d, n1, n2, n1*s1 + _f1, n2*s2 + _f2] = \
-    #                                             dn1[d, n1, n2] * w[d, _f1, _f2]
-#            dn0[n1*s1 + _f1, n2*s2 + _f2] += dn1[d, n1, n2] * w[d, _f1, _f2]
 
 @cuda.jit
 def conv_run(x, y, w, b, s, f):
@@ -301,20 +285,19 @@ def conv_run(x, y, w, b, s, f):
 # Error:
 # ------
 # Qplus = max(a, Q(s', a))
-# E = 1/2((R + gamma * Qplus) - Q)^2
+# E = 1/2 * (R + gamma * Qplus - Q)^2
 #
 # Train:
 # ------
 # dE/dwi = dE/dQ * dQ/dwi
-# dE/dQ = (Q - (R + gamma * Qplus))
+# dE/dQ = 1/2 * 2 * (R + gamma * QPlus - Q) * -Q
 # dQ/dwi = xi
-# -> wi = wi - alpha * dwi
-# -> wi = wi + alpha * (R + gamma * Qplus - Q) * xi
+# -> wi = wi + alpha * (R + gamma * Qplus - Q) * Q * xi
 #
 # Delta node:
 # -----------
 # dni = dE/dxi = dE/dQ * dQ/dxi
-#    = (Q - (R + gamma * Qplus)) * wi
+#    = (R + gamma * QPlus - Q) * -Q * wi
 
 @cuda.jit
 def dqn_train(dn, x, Q, Qplus, r, w, b, alpha, gamma, sel):
@@ -322,14 +305,14 @@ def dqn_train(dn, x, Q, Qplus, r, w, b, alpha, gamma, sel):
     n = cuda.threadIdx.x
 
     # dE/dQ
-    temp = r[n] + gamma[0] * Qplus[n] - Q[n]
+    temp = (r[n] + gamma[0] * Qplus[n] - Q[n]) * (-Q[n])
 
     # No update if the action was not selected
     # dw = alpha * dE/dQ * dQ/dwi
-    b[n] += alpha[0] * temp * sel[n]
+    b[n] -= alpha[0] * temp * sel[n]
     for i in range(len(x)):
-            w[n][i] += alpha[0] * temp * x[i] * sel[n]
-            dn[n][i] = temp * w[n][i] * sel[n] * -1
+            w[n, i] -= alpha[0] * temp * x[i] * sel[n]
+            dn[n, i] = temp * w[n, i] * sel[n]
 
 @cuda.jit
 def dqn_run(x, Q, w, b):
@@ -339,7 +322,7 @@ def dqn_run(x, Q, w, b):
     sum = 0
 
     for i in range(len(x)):
-        sum += x[i] * w[n][i]
+        sum += x[i] * w[n, i]
 
     # Adder
     Q[n] = b[n] + sum
@@ -372,7 +355,7 @@ class DQL:
     a = 0       # Save action for experiance replay
     x = None    # Save state for experiance replay
 
-    rply_limit    = 1000
+    rply_limit    = 100
     rply_samples  = 10000
     rply_stop     = False
     rply_cnt      = 0
@@ -415,10 +398,10 @@ class DQL:
                 {
                     'x':  np.zeros((d, inp[0], inp[1])),
                     'y':  np.zeros((d, n1, n2)),
-                    'dn': np.zeros((inp[0], inp[0])),
+                    'dn': np.zeros((inp[0], inp[1])),
                     'w':  np.random.uniform(w[0], w[1], (d, f[0], f[1])),
                     # 'b':  np.full((d, n1, n2), b),
-                    'b':  np.full((d), b),
+                    'b':  np.full(d, b),
                     's':  s,
                     'f':  f,
                     'alpha': alpha,
@@ -535,6 +518,10 @@ class DQL:
         global rply_mutex
         global layers_mutex
 
+        global DQN_ALPHA
+        global CONV_ALPHA
+        global FC_ALPHA
+
         str = cuda.stream()
 
         exp = 0
@@ -559,7 +546,7 @@ class DQL:
 
             # Get an experiance randomly
             exp = np.random.randint(low=0, high=len(rply_save))
-            x ,a, r, xPlus = rply_save.keys()[exp]
+            x, a, r, xPlus = rply_save.keys()[exp]
             rply_save[x ,a, r, xPlus] += 1
             rply_mutex.release()
 
@@ -657,15 +644,15 @@ class DQL:
                                                         d_s, d_f, d_alpha)
 
                     # Move data from device to host
-                   # d_dn0.copy_to_host(self.rply_layers[l]['dn'], str)
-                   # d_w.copy_to_host(self.rply_layers[l]['w'], str)
+                    # d_dn0.copy_to_host(self.rply_layers[l]['dn'], str)
+                    # d_w.copy_to_host(self.rply_layers[l]['w'], str)
                     d_dn0.copy_to_host(dn0, str)
                     d_dw.copy_to_host(dw, str)
-                    d_b.copy_to_host(self.rply_layers[l]['b'], str)
+                    # d_b.copy_to_host(self.rply_layers[l]['b'], str)
 
                     for _d in range(d):
-                        self.layers[l]['b'][_d] -= self.layers[l]['alpha'] * \
-                                        np.sum(self.layers[l+1]['dn'][_d, : , :])
+                        self.rply_layers[l]['b'][_d] -= self.rply_layers[l]['alpha'] * \
+                                        np.sum(self.rply_layers[l+1]['dn'][_d, : , :])
 
                     for _d in range(d):
                         for _f1 in range(f1):
@@ -676,12 +663,12 @@ class DQL:
                     if l == 0:
                         continue
 
-                    self.layers[l]['dn'] = np.zeros(self.layers[l]['dn'].shape)
+                    self.rply_layers[l]['dn'] = np.zeros((inp1, inp2))
 
                     for _d in range(d):
                         for _n1 in range(n1):
                             for _n2 in range(n2):
-                                self.layers[l]['dn'] += dn0[_d, _n1, _n2]
+                                self.rply_layers[l]['dn'] += dn0[_d, _n1, _n2]
 
                     # for _i1 in range(inp1):
                     #     for _i2 in range(inp2):
@@ -694,14 +681,13 @@ class DQL:
                     d_dn1   = cuda.to_device(self.rply_layers[l+1]['dn'], str)
                     d_dn0   = cuda.to_device(self.rply_layers[l]['dn'], str)
                     d_x     = cuda.to_device(self.rply_layers[l]['x'], str)
-                    d_prev  = cuda.to_device(self.l_info[l+1][0], str)
 
                     # One thread per element, assuming no more than n2 < 1024
                     d, n1, n2 = self.rply_layers[l]['shape']
                     bl = (d, n1)
                     th = n2
 
-                    relu_back[bl, th, str](d_dn1, d_dn0, d_x, d_prev)
+                    relu_back[bl, th, str](d_dn1, d_dn0, d_x)
 
                     # Move data from device to host
                     d_dn0.copy_to_host(self.rply_layers[l]['dn'], str)
@@ -755,7 +741,7 @@ class DQL:
             # Set an update during the next training session
             if self.rply_cnt >= self.rply_limit:
 
-                print "NEW WEIGHT LOADED"
+                print "NEW WEIGHT LOADED --------------------------------------"
                 self.rply_cnt  = 0
 
                 layers_mutex.acquire()
@@ -824,8 +810,13 @@ class DQL:
 
         # Avoid the replay thread to upload the new weight during a pass
         layers_mutex.acquire()
-        self.a, _ = self.run(x, self.layers, str, True)
+        self.a, Q = self.run(x, self.layers, str, True)
         layers_mutex.release()
+
+        # print
+        # print x
+        # print
+        print "TRAIN:", Q
 
         return self.a
 
@@ -952,7 +943,7 @@ class DQL:
 
         # Greedy selection, P(explore) to not choose the given action
         if explore:
-            e = 5000.0 / (5000.0 + self.explore_cnt)
+            e = 1000.0 / (1000.0 + self.explore_cnt)
             greedy = np.full(len(l_out), e / (len(l_out)-1))
             greedy[np.argmax(l_out)] = 1.0 - e
             a = np.random.choice(len(l_out), 1, p=greedy.flatten())[0]
@@ -961,6 +952,7 @@ class DQL:
             return a, l_out
         else:
             return np.argmax(l_out), l_out
+        # return np.argmax(l_out), l_out
 
 # ------------------------------------------------------------------------------
 
@@ -970,16 +962,16 @@ WINDOW_WIDTH   = 10
 WINDOW_HEIGHT  = 10
 WINDOW_COLOR   = (0, 0, 0)
 
-CONV_ALPHA  = 1e-3
-FC_ALPHA    = 1e-2
-DQN_ALPHA   = 1e-2
-DQN_GAMMA   = 9e-1
+CONV_ALPHA  = 1e-6
+FC_ALPHA    = 1e-6
+DQN_ALPHA   = 1e-6
+DQN_GAMMA   = 5e-1
 TRAINING    = True
 
-MOVE_REWARD_POS  =  1e-2 # Reward for good move
-MOVE_REWARD_NEG  = -1e-2 # Reward for bad move
-LOSE_REWARD      = -5e-1
-FRUIT_REWARD     =  5e-1
+MOVE_REWARD_POS  =  1e-1 # Reward for good move
+MOVE_REWARD_NEG  = -5e-1 # Reward for bad move
+LOSE_REWARD      = -1e-0
+FRUIT_REWARD     =  5e-0
 
 ACTION_TIME      = 500 #ms
 
@@ -990,7 +982,7 @@ SNAKE_GROWING     = 1 # SQUARES
 SNAKE_INIT_POSX   = WINDOW_WIDTH  / 2 # SQUARES
 SNAKE_INIT_POSY   = WINDOW_HEIGHT / 2 # SQUARES
 SNAKE_COLOR       = (0, 100, 0)
-SNAKE_COLOR_HEAD  = (0, 200, 0)
+SNAKE_COLOR_HEAD  = (0, 100, 100)
 
 INIT_DIRECTION = "UP"
 
@@ -1197,11 +1189,11 @@ def getReward(snake, fruit):
     fruit_pos = fruit.getPosition()
 
     # Calcul the distance between fruit and snake
-    d = sqrt(abs(snake_pos[0] - fruit_pos[0])**2 +\
-             abs(snake_pos[1] - fruit_pos[1])**2)
+    d = sqrt((snake_pos[0] - fruit_pos[0])**2 +\
+             (snake_pos[1] - fruit_pos[1])**2)
 
     # If new distance smaller than previous, positif reward
-    if (pd - d) >= 0:
+    if (pd - d) > 0:
         r = MOVE_REWARD_POS
     else:
         r = MOVE_REWARD_NEG
@@ -1231,7 +1223,7 @@ def getState(snake, fruit):
     for i in range(3):
         for x in range(WINDOW_WIDTH):
             for y in range(WINDOW_HEIGHT):
-                state[i, x, y] = color[i][x*SQUARE_SIZE][y*SQUARE_SIZE]
+                state[i, x, y] = color[i][x * SQUARE_SIZE][y * SQUARE_SIZE]
 
     return state
 
@@ -1338,36 +1330,40 @@ if __name__ == "__main__":
     # (w - f + 2 * p) / s + 1 = number of neurones along each row
 
     in1 = (WINDOW_WIDTH, WINDOW_HEIGHT)
-    f1 = (2, 2)
+    f1 = (3, 3)
     s1 = (1, 1)
     p1 = (0, 0)
-    d1 = 32
-    w1 = (-0.01, 0.01)
+    d1 = 1
+    w1 = (-0.1, 0.1)
     b1 = 0.00
 
     in2 = (8, 8)
-    f2 = (2, 2)
+    f2 = (3, 3)
     s2 = (1, 1)
     p2 = (0, 0)
-    d2 = 64
-    w2 = (-0.01, 0.01)
+    d2 = 1
+    w2 = (-0.1, 0.1)
     b2 = 0.00
 
     in3 = (6, 6)
     f3 = (2, 2)
     s3 = (2, 2)
     p3 = (0, 0)
-    d3 = 64
-    w3 = (-0.01, 0.01)
+    d3 = 1
+    w3 = (-0.1, 0.1)
     b3 = 0.00
 
-    n4 = 512
+    n4 = 64
     w4 = (-0.1, 0.1)
-    b4 = 0.00
+    b4 = 0.0
 
-    n5 = 3
+    n5 = 32
     w5 = (-0.1, 0.1)
-    b5 = 0.00
+    b5 = 0.0
+
+    n6 = 3
+    w6 = (-0.1, 0.1)
+    b6 = 0.0
 
     l = [
             ("Conv",     (d1, in1, f1, p1, s1, CONV_ALPHA, w1, b1)),
@@ -1377,8 +1373,10 @@ if __name__ == "__main__":
             ("Conv",     (d3, in3, f3, p3, s3, CONV_ALPHA, w3, b3)),
             ("ReLu",     ()),
             ("FC",       (n4, FC_ALPHA, w4, b4)),
-            ("ReLu2",     ()),
-            ("DQN",      (n5, DQN_ALPHA, DQN_GAMMA, w5, b5)),
+            ("ReLu2",    ()),
+            ("FC",       (n5, FC_ALPHA, w5, b5)),
+            ("ReLu2",    ()),
+            ("DQN",      (n6, DQN_ALPHA, DQN_GAMMA, w6, b6)),
         ]
 
     try:
@@ -1393,6 +1391,8 @@ if __name__ == "__main__":
         replay_thread = threading.Thread(target=agent.experiance_replay)
         replay_thread.daemon = True
         replay_thread.start()
+
+        # agent.explore_cnt = 0
 
     # init Pygame
     pygame.init()
