@@ -27,20 +27,15 @@ class PolicyGradient():
 
     def __init__(self, out, inp, alpha=0.9, gamma=0.9):
 
-        # alpha     learning factor
-        # gamma     reward factor
-        # A         list of possible actions
-        # s         state
-        # a         action
-        # r         reward
-        # pi         policy
 
-        self.gamma    = gamma
-        self.alpha    = alpha
-        self.s        = None
-        self.a        = None
+        self.gamma    = gamma   # learning factor
+        self.alpha    = alpha   # Discount factor
+
+        self.s        = None    # state
+        self.a        = None    # action
         self.l        = None
-        self.pi       = None
+        self.pi       = None    # Policy
+
         self.w        = np.random.uniform(-0.1, 0.1, (out, inp))
         self.b        = np.zeros(out)
         self.epi      = []
@@ -125,7 +120,6 @@ if __name__ == "__main__":
     for e in range(EPSIODES):
 
         t = 0
-        r = 0
         R = 0
         s = env.reset()
 

@@ -3,6 +3,8 @@
 @author: Nathan Loretan
 """
 
+# TODO: use cross entropy as loss function, work with softmax
+
 import sys
 import gzip
 import time
@@ -290,14 +292,14 @@ def conv_run(x, y, w, b, s, f):
 # Train:
 # ------
 # dE/dwi = dE/dQ * dQ/dwi
-# dE/dQ = 1/2 * 2 * (R + gamma * QPlus - Q) * -Q
+# dE/dQ = 1/2 * 2 * (R + gamma * QPlus - Q) * -1
 # dQ/dwi = xi
-# -> wi = wi + alpha * (R + gamma * Qplus - Q) * Q * xi
+# -> wi = wi + alpha * (R + gamma * Qplus - Q) * 1 * xi
 #
 # Delta node:
 # -----------
 # dni = dE/dxi = dE/dQ * dQ/dxi
-#    = (R + gamma * QPlus - Q) * -Q * wi
+#    = (R + gamma * QPlus - Q) * -1 * wi
 
 @cuda.jit
 def dqn_train(dn, x, Q, Qplus, r, w, b, alpha, gamma, sel):
@@ -305,7 +307,7 @@ def dqn_train(dn, x, Q, Qplus, r, w, b, alpha, gamma, sel):
     n = cuda.threadIdx.x
 
     # dE/dQ
-    temp = (r[n] + gamma[0] * Qplus[n] - Q[n]) * (-Q[n])
+    temp = (r[n] + gamma[0] * Qplus[n] - Q[n]) * -1 #(-Q[n])
 
     # No update if the action was not selected
     # dw = alpha * dE/dQ * dQ/dwi
@@ -399,9 +401,11 @@ class DQL:
                     'x':  np.zeros((d, inp[0], inp[1])),
                     'y':  np.zeros((d, n1, n2)),
                     'dn': np.zeros((inp[0], inp[1])),
-                    'w':  np.random.uniform(w[0], w[1], (d, f[0], f[1])),
-                    # 'b':  np.full((d, n1, n2), b),
-                    'b':  np.full(d, b),
+                    # 'w':  np.random.uniform(w[0], w[1], (d, f[0], f[1])),
+                    # # 'b':  np.full((d, n1, n2), b),
+                    # 'b':  np.full(d, b),
+                    'w':  np.random.normal(0, w, (d, f[0], f[1])),
+                    'b':  np.random.normal(0, w, d),
                     's':  s,
                     'f':  f,
                     'alpha': alpha,
@@ -456,8 +460,10 @@ class DQL:
                     'x':  np.zeros(inp),
                     'y':  np.zeros(n),
                     'dn': np.zeros((n, inp)),
-                    'w':  np.random.uniform(w[0], w[1], (n, inp)),
-                    'b':  np.full(n, b),
+                    # 'w':  np.random.uniform(w[0], w[1], (n, inp)),
+                    # 'b':  np.full(n, b),
+                    'w':  np.random.normal(0, w, (n, inp)),
+                    'b':  np.random.normal(0, w, n),
                     'alpha': alpha,
                     'shape': n
                 }
@@ -478,8 +484,10 @@ class DQL:
                     'x':  np.zeros(inp),
                     'Q':  np.zeros(n),
                     'dn': np.zeros((n, inp)),
-                    'w':  np.random.uniform(w[0], w[1], (n, inp)),
-                    'b':  np.full(n, b),
+                    # 'w':  np.random.normal(w[0], w[1], (n, inp)),
+                    # 'b':  np.full(n, b),
+                    'w':  np.random.normal(0, w, (n, inp)),
+                    'b':  np.random.normal(0, w, n),
                     'alpha': alpha,
                     'gamma': gamma,
                     'shape': n,
@@ -943,7 +951,7 @@ class DQL:
 
         # Greedy selection, P(explore) to not choose the given action
         if explore:
-            e = 1000.0 / (1000.0 + self.explore_cnt)
+            e = 5000.0 / (5000.0 + self.explore_cnt)
             greedy = np.full(len(l_out), e / (len(l_out)-1))
             greedy[np.argmax(l_out)] = 1.0 - e
             a = np.random.choice(len(l_out), 1, p=greedy.flatten())[0]
@@ -962,16 +970,16 @@ WINDOW_WIDTH   = 10
 WINDOW_HEIGHT  = 10
 WINDOW_COLOR   = (0, 0, 0)
 
-CONV_ALPHA  = 1e-6
+CONV_ALPHA  = 1e-8
 FC_ALPHA    = 1e-6
 DQN_ALPHA   = 1e-6
-DQN_GAMMA   = 5e-1
+DQN_GAMMA   = 99e-1
 TRAINING    = True
 
-MOVE_REWARD_POS  =  1e-1 # Reward for good move
-MOVE_REWARD_NEG  = -5e-1 # Reward for bad move
-LOSE_REWARD      = -1e-0
-FRUIT_REWARD     =  5e-0
+MOVE_REWARD_POS  = -1e-2 # Reward for good move
+MOVE_REWARD_NEG  = -1e-2 # Reward for bad move
+LOSE_REWARD      = -1e-1
+FRUIT_REWARD     =  5e-1
 
 ACTION_TIME      = 500 #ms
 
@@ -981,8 +989,8 @@ SNAKE_INIT_LENGTH = 5 # SQUARES
 SNAKE_GROWING     = 1 # SQUARES
 SNAKE_INIT_POSX   = WINDOW_WIDTH  / 2 # SQUARES
 SNAKE_INIT_POSY   = WINDOW_HEIGHT / 2 # SQUARES
-SNAKE_COLOR       = (0, 100, 0)
-SNAKE_COLOR_HEAD  = (0, 100, 100)
+SNAKE_COLOR       = (255, 255, 255)
+SNAKE_COLOR_HEAD  = (255, 255, 255)
 
 INIT_DIRECTION = "UP"
 
@@ -1330,40 +1338,36 @@ if __name__ == "__main__":
     # (w - f + 2 * p) / s + 1 = number of neurones along each row
 
     in1 = (WINDOW_WIDTH, WINDOW_HEIGHT)
-    f1 = (3, 3)
-    s1 = (1, 1)
+    d1 = 32
+    f1 = (2, 2)
+    s1 = (2, 2)
     p1 = (0, 0)
-    d1 = 1
-    w1 = (-0.1, 0.1)
-    b1 = 0.00
+    w1 = 0.01
+    b1 = 0.01
 
-    in2 = (8, 8)
+    in2 = (5, 5)
+    d2 = 64
     f2 = (3, 3)
-    s2 = (1, 1)
+    s2 = (2, 2)
     p2 = (0, 0)
-    d2 = 1
-    w2 = (-0.1, 0.1)
-    b2 = 0.00
+    w2 = 0.01
+    b2 = 0.01
 
-    in3 = (6, 6)
-    f3 = (2, 2)
-    s3 = (2, 2)
+    in3 = (2, 2)
+    d3 = 64
+    f3 = (1, 1)
+    s3 = (1, 1)
     p3 = (0, 0)
-    d3 = 1
-    w3 = (-0.1, 0.1)
-    b3 = 0.00
+    w3 = 0.01
+    b3 = 0.01
 
-    n4 = 64
-    w4 = (-0.1, 0.1)
-    b4 = 0.0
+    n4 = 512
+    w4 = 0.01
+    b4 = 0.01
 
-    n5 = 32
-    w5 = (-0.1, 0.1)
-    b5 = 0.0
-
-    n6 = 3
-    w6 = (-0.1, 0.1)
-    b6 = 0.0
+    n5 = 3
+    w5 = 0.01
+    b5 = 0.01
 
     l = [
             ("Conv",     (d1, in1, f1, p1, s1, CONV_ALPHA, w1, b1)),
@@ -1374,9 +1378,7 @@ if __name__ == "__main__":
             ("ReLu",     ()),
             ("FC",       (n4, FC_ALPHA, w4, b4)),
             ("ReLu2",    ()),
-            ("FC",       (n5, FC_ALPHA, w5, b5)),
-            ("ReLu2",    ()),
-            ("DQN",      (n6, DQN_ALPHA, DQN_GAMMA, w6, b6)),
+            ("DQN",      (n5, DQN_ALPHA, DQN_GAMMA, w5, b5)),
         ]
 
     try:
@@ -1392,7 +1394,7 @@ if __name__ == "__main__":
         replay_thread.daemon = True
         replay_thread.start()
 
-        # agent.explore_cnt = 0
+        agent.explore_cnt = 0
 
     # init Pygame
     pygame.init()
