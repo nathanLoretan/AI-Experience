@@ -234,176 +234,126 @@ def classification2(type=1):
 
         if type == 1:
             (dataset, cat, disx, disy) = \
-                pickle.load(file('dataset/classification2_1'))
+                pickle.load(open('dataset/classification2_1', 'rb'))
         elif type == 2:
             (dataset, cat, disx, disy) = \
-                pickle.load(file('dataset/classification2_2'))
+                pickle.load(open('dataset/classification2_2', 'rb'))
         elif type == 3:
             (dataset, cat, disx, disy) = \
-                pickle.load(file('dataset/classification2_3'))
+                pickle.load(open('dataset/classification2_3', 'rb'))
         elif type == 4:
             (dataset, cat, disx, disy) = \
-                pickle.load(file('dataset/classification2_4'))
+                pickle.load(open('dataset/classification2_4', 'rb'))
 
         # Create Neural network with 2 input parameters and 1 neurone
         nn = MLP(2, [1])
 
+        train_data = dataset[:int(0.8 * len(dataset))]
+        test_data  = dataset[int(0.8 * len(dataset)):]
+
         # Train the neural network, select randomly the data in the dataset
-        for x in np.random.permutation(np.arange(len(dataset))):
-            nn.train(dataset[x][:2], [dataset[x][2]])
+        for x in np.random.permutation(np.arange(len(train_data))):
+            nn.train(train_data[x][:2], [train_data[x][2]])
 
-        # Result for graphical display
-        plt.figure("Dataset_solution")
+        accuracy = 0
 
-        x1 = np.linspace(disx[0], disx[1], 30)
-        x2 = np.linspace(disy[0], disy[1], 30)
+        for x in np.random.permutation(np.arange(len(test_data))):
 
-        for i in x1:
-            for y in x2:
-                out = nn.run([i,y])
+            out = nn.run(test_data[x][:2])
 
-                if out < 0.5:
-                    c = colorlist[0]
-                else:
-                    c = colorlist[1]
+            if out < 0.5 and test_data[x][2] == 0 or \
+               out >= 0.5 and test_data[x][2] == 1:
+                accuracy += 1
 
-                plt.plot(i, y, c + 's', markersize=10, alpha=0.1, mec=None)
-
-        for data in dataset:
-            for i in range(len(cat)):
-                if data[2] == cat[i] and i < len(colorlist):
-                    plt.plot(data[0], data[1], colorlist[i] + 'o')
-
-        plt.grid(True)
-        plt.xlabel('x1', fontsize=16)
-        plt.ylabel('x2', fontsize=16)
-        plt.show()
+        print("accuracy of", accuracy / len(test_data))
 
 def xor():
 
-    (dataset, cat, disx, disy) = pickle.load(file('dataset/xor_problem'))
+    (dataset, cat, disx, disy) = pickle.load(open('dataset/xor_problem', 'rb'))
 
     # Create Neural network with 2 input parameters and 1 neurone
     nn = MLP(2, [5, 3, 1])
 
+    train_data = dataset[:int(0.8 * len(dataset))]
+    test_data  = dataset[int(0.8 * len(dataset)):]
+
     # Train the neural network, select randomly the data in the dataset
-    for i in range(200):
-        for x in np.random.permutation(np.arange(len(dataset))):
-            nn.train(dataset[x][:2], [dataset[x][2]])
+    for i in range(len(train_data)):
+        for x in np.random.permutation(np.arange(len(train_data))):
+            nn.train(train_data[x][:2], [train_data[x][2]])
 
-    # Result for graphical display
-    plt.figure("Dataset_solution")
+    accuracy = 0
 
-    x1 = np.linspace(disx[0], disx[1], 30)
-    x2 = np.linspace(disy[0], disy[1], 30)
+    for x in np.random.permutation(np.arange(len(test_data))):
 
-    for i in x1:
-        for y in x2:
-            out = nn.run([i,y])
+        out = nn.run(test_data[x][:2])
 
-            if out < 0.5:
-                c = colorlist[0]
-            else:
-                c = colorlist[1]
+        if out < 0.5 and test_data[x][2] == 0 or \
+           out >= 0.5 and test_data[x][2] == 1:
+            accuracy += 1
 
-            plt.plot(i, y, c + 's', markersize=10, alpha=0.1, mec=None)
-
-    for data in dataset:
-        for i in range(len(np.unique(cat))):
-            if data[2] == cat[i] and i < len(colorlist):
-                plt.plot(data[0], data[1], colorlist[i] + 'o')
-
-    plt.grid(True)
-    plt.xlabel('x1', fontsize=16)
-    plt.ylabel('x2', fontsize=16)
-    plt.show()
+    print("accuracy of", accuracy / len(test_data))
 
 def classification4():
 
-    (dataset, cat, disx, disy) = pickle.load(file('dataset/classification4'))
+    (dataset, cat, disx, disy) = pickle.load(open('dataset/classification4', 'rb'))
 
     # Create Neural network with 2 input parameters and 1 neurone
     nn = MLP(2, [4, 2])
 
+    train_data = dataset[:int(0.8 * len(dataset))]
+    test_data  = dataset[int(0.8 * len(dataset)):]
+
     # Train the neural network, select randomly the data in the dataset
-    for i in range(100):
-        for x in np.random.permutation(np.arange(len(dataset))):
-                nn.train(dataset[x][:2], dataset[x][2])
+    for i in range(len(train_data)):
+        for x in np.random.permutation(np.arange(len(train_data))):
+                nn.train(train_data[x][:2], train_data[x][2])
 
-    # Result for graphical display
-    plt.figure("Dataset_solution")
+    accuracy = 0
 
-    x1 = np.linspace(disx[0], disx[1], 30)
-    x2 = np.linspace(disy[0], disy[1], 30)
+    for x in np.random.permutation(np.arange(len(test_data))):
 
-    for i in x1:
-        for y in x2:
-            out = nn.run([i,y])
+        out = nn.run(test_data[x][:2])
 
-            if out[0] < 0.5 and out[1] < 0.5:       # 0
-                c = colorlist[0]
-            elif out[0] >= 0.5 and out[1] < 0.5:    # 1
-                c = colorlist[1]
-            elif out[0] < 0.5 and out[1] >= 0.5:    # 2
-                c = colorlist[2]
-            elif out[0] >= 0.5 and out[1] >= 0.5:   # 3
-                c = colorlist[3]
+        if out[0] < 0.5  and out[1] < 0.5  and np.array_equal(test_data[x][2], [0, 0]) or \
+           out[0] >= 0.5 and out[1] < 0.5  and np.array_equal(test_data[x][2], [1, 0]) or \
+           out[0] < 0.5  and out[1] >= 0.5 and np.array_equal(test_data[x][2], [0, 1]) or \
+           out[0] >= 0.5 and out[1] >= 0.5 and np.array_equal(test_data[x][2], [1, 1]):
+            accuracy += 1
 
-            plt.plot(i, y, c + 's', markersize=10, alpha=0.1, mec=None)
-
-    for data in dataset:
-        for i in range(len(cat)):
-            if data[2] == cat[i] and i < len(colorlist):
-                plt.plot(data[0], data[1], colorlist[i] + 'o')
-
-    plt.grid(True)
-    plt.xlabel('x1', fontsize=16)
-    plt.ylabel('x2', fontsize=16)
-    plt.show()
+    print("accuracy of", accuracy / len(test_data))
 
 def kernel():
 
-    (dataset, cat, disx, disy) = pickle.load(file('dataset/kernel'))
+    (dataset, cat, disx, disy) = pickle.load(open('dataset/kernel', 'rb'))
 
     # Create Neural network with 2 input parameters and 1 neurone
     nn = MLP(2, [8, 1])
 
+    train_data = dataset[:int(0.8 * len(dataset))]
+    test_data  = dataset[int(0.8 * len(dataset)):]
+
     # Train the neural network, select randomly the data in the dataset
-    for i in range(100):
-        for x in np.random.permutation(np.arange(len(dataset))):
-            nn.train(dataset[x][:2], [dataset[x][2]])
+    for i in range(len(train_data)):
+        for x in np.random.permutation(np.arange(len(train_data))):
+            nn.train(train_data[x][:2], [train_data[x][2]])
 
-    # Result for graphical display
-    plt.figure("Dataset_solution")
+    accuracy = 0
 
-    x1 = np.linspace(disx[0], disx[1], 30)
-    x2 = np.linspace(disy[0], disy[1], 30)
+    for x in np.random.permutation(np.arange(len(test_data))):
 
-    for i in x1:
-        for y in x2:
-            out = nn.run([i,y])
+        out = nn.run(test_data[x][:2])
 
-            if out < 0.5:
-                c = colorlist[0]
-            else:
-                c = colorlist[1]
+        if out < 0.5 and test_data[x][2] == 0 or \
+           out >= 0.5 and test_data[x][2] == 1:
+            accuracy += 1
 
-            plt.plot(i, y, c + 's', markersize=10, alpha=0.1, mec=None)
-
-    for data in dataset:
-        for i in range(len(cat)):
-            if data[2] == cat[i] and i < len(colorlist):
-                plt.plot(data[0], data[1], colorlist[i] + 'o')
-
-    plt.grid(True)
-    plt.xlabel('x1', fontsize=16)
-    plt.ylabel('x2', fontsize=16)
-    plt.show()
+    print("accuracy of", accuracy / len(test_data))
 
 if __name__ == "__main__":
 
     classification2(1)
-    # classification2(2)
+    classification2(2)
     classification2(3)
     classification2(4)
     xor()

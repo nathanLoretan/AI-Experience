@@ -24,6 +24,8 @@ def display(dataset, cat, isBlocking=False):
 
     for x in dataset:
         for c in range(len(cat)):
+            print(x[2])
+            print(cat[c])
             if x[2] == cat[c] and c < len(markerlist):
                 plt.plot(x[0], x[1], colorlist[c] + 'o')
             elif c >= len(markerlist):
@@ -81,7 +83,7 @@ def classification(nbrData, cat, disx, disy, filename="dataset",
             [np.min(disx), np.max(disx)],   # min and max x values
             [np.min(disy), np.max(disy)])   # min and max y values
 
-    pickle.dump(info, file('dataset/' + filename,'w'))
+    pickle.dump(info, open('dataset/' + filename,'wb'))
 
     return dataset
 
@@ -109,8 +111,8 @@ if __name__ == "__main__":
 
     x = [[0.0, 0.5], [0.5, 1.0], [0.0, 0.5], [0.5, 1.0]]
     y = [[0.0, 0.5], [0.0, 0.5], [0.5, 1.0], [0.5, 1.0]]
-    classification(300, [[0,0], [1,0], [0,1], [1,1]], x, y, 'classification4')
+    classification(300, [[0,0], [1,0], [0,1], [1,1]], x, y, 'classification4', False)
 
     x = [[0.0, 1.0],  [0.0,  1.0], [0.0,  0.25], [0.75, 1.0],  [0.25, 0.75]]
     y = [[0.0, 0.25], [0.75, 1.0], [0.25, 0.75], [0.25, 0.75], [0.25, 0.75]]
-    classification(500, [1, 1, 1, 1, 0], x, y, 'kernel')
+    classification(500, [1, 1, 1, 1, 0], x, y, 'kernel', False)
