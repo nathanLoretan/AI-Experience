@@ -10,6 +10,7 @@ import tensorflow.keras.layers as kl
 import tensorflow.keras.losses as kls
 import tensorflow.keras.optimizers as ko
 
+from copy import deepcopy, copy
 from ple import PLE
 from time import sleep
 from pygame.locals import *
@@ -21,7 +22,8 @@ class Model(tf.keras.Model):
     def __init__(self, nbr_actions):
         super().__init__('mlp_policy')
 
-        self.hidden1_q  = kl.Dense(128, activation='relu')
+        self.hidden1_q  = kl.Dense(256, activation='relu')
+        self.hidden2_q  = kl.Dense(256, activation='relu')
         self.q          = kl.Dense(nbr_actions)
 
     def call(self, inputs):
@@ -29,15 +31,13 @@ class Model(tf.keras.Model):
         x = tf.convert_to_tensor(inputs)
 
         hidden1_q = self.hidden1_q(x)
-        return self.q(hidden1_q)
+        hidden2_q = self.hidden2_q(hidden1_q)
+        return self.q(hidden2_q)
 
     def q_value(self, state):
 
         q = self.predict(state)
         return np.squeeze(q)
-
-model_mutex = threading.Lock()
-experience_mutex = threading.Lock()
 
 class DDQN:
 
@@ -60,18 +60,12 @@ class DDQN:
         self.target_model = model
         self.target_model.compile(optimizer=ko.Adam(self.alpha), loss="MSE")
 
-        self.train_model = model
-        self.train_model.compile(optimizer=ko.Adam(self.alpha), loss="MSE")
-
         # Copy the weights of the online model to the target model
         self.target_model.set_weights(self.model.get_weights())
-        self.train_model.set_weights(self.model.get_weights())
 
     def get_action(self, state):
 
-        model_mutex.acquire()
         q = self.model.q_value(state)
-        model_mutex.release()
 
         # e-Greedy explore
         greedy = np.full(len(q), self.epsilon / (len(q)-1))
@@ -90,67 +84,53 @@ class DDQN:
 
     def store(self, experience):
 
-        experience_mutex.acquire()
         self.experiences.append(experience)
 
         if len(self.experiences) > self.experiences_size:
             self.experiences.pop(0)
 
-        experience_mutex.release()
-
     def train(self):
 
-        while 1:
+        if len(self.experiences) < self.batch_size:
+            return
 
-            experience_mutex.acquire()
-            if len(self.experiences) < self.batch_size:
-                experience_mutex.release()
-                return
-            experience_mutex.release()
+        batch  = []
+        states = []
 
-            batch  = []
-            states = []
+        for i in range(self.batch_size):
 
-            for i in range(self.batch_size):
+            # Get experiances randomly
+            exp = int(np.random.uniform(0, len(self.experiences)))
+            s, s2, r, a, done = self.experiences[exp]
 
-                # Get experiances randomly
-                experience_mutex.acquire()
-                exp = int(np.random.uniform(0, len(self.experiences)))
-                s, s2, r, a, done = self.experiences[exp]
-                experience_mutex.release()
+            states.append(np.squeeze(s, axis=0))
 
-                states.append(np.squeeze(s, axis=0))
+            q = self.model.q_value(s)
 
-                q = self.train_model.q_value(s)
+            if done == True:
+                q[a] = r
+            else:
+                a2 = np.argmax(self.model.q_value(s2))
+                q2 = self.target_model.q_value(s2)
 
-                if done == True:
-                    q[a] = r
-                else:
-                    a2 = np.argmax(self.train_model.q_value(s2))
-                    q2 = self.target_model.q_value(s2)
+                q[a] = r + self.gamma * q2[a2]
 
-                    q[a] = r + self.gamma * q2[a2]
+            batch.append(q)
 
-                batch.append(q)
+        self.model.train_on_batch(np.array(states), np.array(batch))
 
-            self.train_model.train_on_batch(np.array(states), np.array(batch))
+        # Update the target network
+        weights_target = self.target_model.get_weights()
+        weights_model = self.model.get_weights()
 
-            # Update the target network
-            weights_target = self.target_model.get_weights()
-            weights_model  = self.train_model.get_weights()
+        for i in range(len(weights_target)):
 
-            for i in range(len(weights_target)):
+            weights_target[i] *= (1 - self.target_update)
+            weights_model[i]  *= self.target_update
 
-                weights_target[i] *= (1 - self.target_update)
-                weights_model[i]  *= self.target_update
+            weights_target[i] += weights_model[i]
 
-                weights_target[i] += weights_model[i]
-
-            self.target_model.set_weights(weights_target)
-
-            model_mutex.acquire()
-            self.model.set_weights(self.train_model.get_weights())
-            model_mutex.release()
+        self.target_model.set_weights(weights_target)
 
 def get_state(obs):
 
@@ -165,8 +145,6 @@ def get_state(obs):
     state[0, 5] = obs["next_next_pipe_dist_to_player"] / 453
     state[0, 6] = obs["next_next_pipe_top_y"] / 192
     state[0, 7] = obs["next_next_pipe_bottom_y"] / 292
-
-    # state = state / np.sum(state)
 
     return state
 
@@ -188,14 +166,13 @@ if __name__ == '__main__':
     s2 = np.zeros((1, 8))
     s  = np.zeros((1, 8))
 
-    replay_thread = threading.Thread(target=agent.train)
-    replay_thread.daemon = True
-    replay_thread.start()
-
     while 1:
 
         # Number of pipes passed
         passed = 0
+
+        for i in range(2):#10s
+            agent.train()
 
         # Get initial state
         s = get_state(flappy.getGameState())
@@ -218,7 +195,6 @@ if __name__ == '__main__':
                 done = False
 
             agent.store((s.copy(), s2.copy(), r, a, done))
-            # agent.train()
 
             s = s2.copy()
 

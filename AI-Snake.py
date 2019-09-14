@@ -20,57 +20,18 @@ class Model(tf.keras.Model):
     def __init__(self, nbr_actions):
         super().__init__('mlp_policy')
 
-        # 100x100x1
+        # 100x100x16
 
-        self.hidden1 = kl.Conv2D(4, (3, 3), activation='relu', input_shape=(10, 10, 1))
+        self.hidden1 = kl.Conv2D(16, (2, 2), activation='relu')
         self.hidden2 = kl.MaxPooling2D((2, 2), strides=(2, 2))
 
-        # 50x50x16
+        # 5x5x32
 
-        self.hidden3 = kl.Conv2D(8, (3, 3), activation='relu')
-        self.hidden4 = kl.MaxPooling2D((2, 2), strides=(2, 2))
+        self.hidden3 = kl.Conv2D(32, (2, 2), activation='relu')
 
-        # 25x25x32
-
-        self.hidden5 = kl.Conv2D(16, (3, 3), activation='relu')
-
-        # 25x25x64
-
-        self.hidden6 = kl.Conv2D(16, (3, 3), activation='relu')
-
-        # 25x25x16
-
-        self.hidden7 = kl.Flatten()
-        self.hidden8 = kl.Dense(128, activation='relu')
-        self.q        = kl.Dense(nbr_actions, name='q')
-
-        # # 100x100x1
-        #
-        # self.hidden1 = kl.Conv2D(16, (3, 3), activation='relu', input_shape=(10, 10, 1))
-        # self.hidden2 = kl.BatchNormalization()
-        # self.hidden3 = kl.MaxPooling2D((2, 2), strides=(2, 2))
-        #
-        # # 50x50x16
-        #
-        # self.hidden4 = kl.Conv2D(32, (3, 3), activation='relu')
-        # self.hidden5 = kl.BatchNormalization()
-        # self.hidden6 = kl.MaxPooling2D((2, 2), strides=(2, 2))
-        #
-        # # 25x25x32
-        #
-        # self.hidden7 = kl.Conv2D(64, (3, 3), activation='relu')
-        # self.hidden8 = kl.BatchNormalization()
-        #
-        # # 25x25x64
-        #
-        # self.hidden9 = kl.Conv2D(16, (3, 3), activation='relu')
-        # self.hidden10 = kl.BatchNormalization()
-        #
-        # # 25x25x16
-        #
-        # self.hidden11 = kl.Flatten()
-        # self.hidden12 = kl.Dense(128, activation='relu')
-        # self.q        = kl.Dense(nbr_actions, name='q')
+        self.hidden4 = kl.Flatten()
+        self.hidden5 = kl.Dense(256, activation='relu')
+        self.q       = kl.Dense(nbr_actions, name='q')
 
     def call(self, inputs):
 
@@ -81,24 +42,7 @@ class Model(tf.keras.Model):
         hidden3 = self.hidden3(hidden2)
         hidden4 = self.hidden4(hidden3)
         hidden5 = self.hidden5(hidden4)
-        hidden6 = self.hidden6(hidden5)
-        hidden7 = self.hidden7(hidden6)
-        hidden8 = self.hidden8(hidden7)
-        q = self.q(hidden8)
-
-        # hidden1 = self.hidden1(x)
-        # hidden2 = self.hidden2(hidden1)
-        # hidden3 = self.hidden3(hidden2)
-        # hidden4 = self.hidden4(hidden3)
-        # hidden5 = self.hidden5(hidden4)
-        # hidden6 = self.hidden6(hidden5)
-        # hidden7 = self.hidden7(hidden6)
-        # hidden8 = self.hidden8(hidden7)
-        # hidden9 = self.hidden9(hidden8)
-        # hidden10 = self.hidden10(hidden9)
-        # hidden11 = self.hidden11(hidden10)
-        # hidden12 = self.hidden12(hidden11)
-        # q = self.q(hidden12)
+        q = self.q(hidden5)
 
         return q
 
@@ -123,12 +67,7 @@ class DQN:
         self.batch_size     = 32
 
         self.model = model
-
-        try:
-            self.model.load_weights("AI-Snake.h5")
-        except:
-            self.model.compile(optimizer=ko.Adam(self.alpha),
-                               loss="MSE")
+        self.model.compile(optimizer=ko.Adam(self.alpha), loss="MSE")
 
     def get_action(self, state, explore):
 
@@ -187,8 +126,6 @@ class DQN:
 
         self.model.train_on_batch(np.array(states), np.array(batch))
 
-        # self.model.save_weights("AI-Snake.h5")
-
     def loss(self, true, prediction):
 
         # 1/2 * (R + gamma * Qplus - Q)^2
@@ -200,19 +137,19 @@ WINDOW_WIDTH   = 10
 WINDOW_HEIGHT  = 10
 WINDOW_COLOR   = (255, 255, 255)
 
-MOVE_REWARD_POS  = 0.1e0 # Reward for good move
-MOVE_REWARD_NEG  = -0.1e0 # Reward for bad move
-LOSE_REWARD      = -1e0
-FRUIT_REWARD     =  1e0
+MOVE_REWARD_POS  = 0 # Reward for good move
+MOVE_REWARD_NEG  = 0 # Reward for bad move
+LOSE_REWARD      = -10e0
+FRUIT_REWARD     =  10e0
 
-FRUIT_COLOR  = (0, 0, 0)
+FRUIT_COLOR  = (0, 255, 0)
 
 SNAKE_INIT_LENGTH = 5 # SQUARES
 SNAKE_GROWING     = 1 # SQUARES
 SNAKE_INIT_POSX   = WINDOW_WIDTH  / 2 # SQUARES
 SNAKE_INIT_POSY   = WINDOW_HEIGHT / 2 # SQUARES
-SNAKE_COLOR       = (120, 120, 120)
-SNAKE_COLOR_HEAD  = (200, 200, 200)
+SNAKE_COLOR       = (0, 0, 0)
+SNAKE_COLOR_HEAD  = (100, 0, 0)
 
 ACTION_TIME      = 1 #ms
 
@@ -438,15 +375,19 @@ def get_step_reward(snake, fruit):
 
 def get_state(snake, fruit):
 
-    surface  = pygame.display.get_surface()
-    color    = pygame.surfarray.pixels_red(surface)
+    surface = pygame.display.get_surface()
+    r       = pygame.surfarray.pixels_red(surface)
+    g       = pygame.surfarray.pixels_green(surface)
+    b       = pygame.surfarray.pixels_blue(surface)
 
-    state    = np.zeros((1, WINDOW_WIDTH * SQUARE_SIZE,
-                            WINDOW_HEIGHT * SQUARE_SIZE, 1))
+    state    = np.zeros((1, WINDOW_WIDTH,
+                            WINDOW_HEIGHT, 3))
 
-    for x in range(WINDOW_WIDTH * SQUARE_SIZE):
-        for y in range(WINDOW_HEIGHT * SQUARE_SIZE):
-            state[0, x, y, 0] = color[x][y] / np.sum(color)
+    for x in range(WINDOW_WIDTH):
+        for y in range(WINDOW_HEIGHT):
+            state[0, x, y, 0] = r[x * SQUARE_SIZE][y * SQUARE_SIZE] / 255
+            state[0, x, y, 1] = g[x * SQUARE_SIZE][y * SQUARE_SIZE] / 255
+            state[0, x, y, 2] = b[x * SQUARE_SIZE][y * SQUARE_SIZE] / 255
 
     return state
 
