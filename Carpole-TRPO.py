@@ -38,8 +38,6 @@ class Model():
                 tf.placeholder(tf.float32, shape=(None,), name='advantages')
             self.pi_old = \
                 tf.placeholder(tf.float32, shape=(None, self.action_space), name='old_pi')
-            self.log_old = \
-                tf.placeholder(tf.float32, (self.action_space,), name='old_log')
 
             # Create neural network
             self.h1_pi = tf.layers.dense(self.states_pi, 128, tf.tanh, name="h1_pi")
