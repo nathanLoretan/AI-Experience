@@ -77,8 +77,8 @@ class Model():
             self.theta_value_dim = [t.shape.as_list() for t in self.theta_value]
             self.theta_value_nbr = np.sum([np.prod(d) for d in self.theta_value_dim])
 
-        # MSE loss for value
-        self.loss_value = 0.5 * tf.reduce_mean(tf.square(self.true_v - self.v))
+        # Square error loss
+        self.loss_value = tf.reduce_mean(tf.square(self.true_v - self.v))
 
         # Adam optimization for grdient descent
         optimizer = tf.train.AdamOptimizer(self.alpha)
