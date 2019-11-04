@@ -18,10 +18,10 @@ class Model():
 
     def __init__(self, action_space, state_space):
 
-        self.alpha             = 1e-3
-        self.gamma             = 0.99
-        self.delta             = 1e-3
-        self.l2_regularization = 5e-3
+        self.alpha = 5e-3
+        self.gamma = 0.99
+        self.delta = 1e-3
+        self.epoch = 10
 
         self.state_space  = state_space
         self.action_space = action_space
@@ -40,7 +40,7 @@ class Model():
                 tf.placeholder(tf.float32, shape=(None, self.action_space), name='old_pi')
 
             # Create neural network
-            self.h1_pi = tf.layers.dense(self.states_pi, 128, tf.tanh, name="h1_pi")
+            self.h1_pi = tf.layers.dense(self.states_pi, 128, tf.nn.relu, name="h1_pi")
             self.pi = tf.layers.dense(self.h1_pi, self.action_space, tf.nn.softmax, name="pi")
 
             # Weights used by the model and dimension of the network
@@ -100,7 +100,7 @@ class Model():
             self.true_v = tf.placeholder(tf.float32, (None,), 'true_v')
 
             # Create neural network
-            self.h1_v = tf.layers.dense(self.states_v, 128, tf.tanh, name="h1_v")
+            self.h1_v = tf.layers.dense(self.states_v, 128, tf.nn.relu, name="h1_v")
             self.v  = tf.squeeze(tf.layers.dense(self.h1_v, 1, None, name="v"))
 
             self.theta_value = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'value')
@@ -108,10 +108,7 @@ class Model():
             self.theta_value_nbr = np.sum([np.prod(d) for d in self.theta_value_dim])
 
             # MSE loss for value
-            self.loss = 0.5 * tf.reduce_mean(tf.square(self.true_v - self.v))
-
-            for t in self.theta_value:
-                self.loss += self.l2_regularization * tf.nn.l2_loss(t)
+            self.loss = tf.reduce_mean(tf.square(self.true_v - self.v))
 
             # Adam optimization for grdient descent
             self.adam_value = tf.train.AdamOptimizer(self.alpha).minimize(self.loss, var_list=self.theta_value)
@@ -257,7 +254,8 @@ class Model():
             self.true_v: true_v
         }
 
-        tf.get_default_session().run(self.adam_value, feed_dict=feed_dict)
+        for _ in range(self.epoch):
+            tf.get_default_session().run(self.adam_value, feed_dict=feed_dict)
 
     def policy(self, state):
 
@@ -287,10 +285,12 @@ class TRPO:
     def __init__(self, action_space, state_space):
 
         self.experiences        = []
-        self.experiences_size   = 1000.0
+        self.experiences_size   = 200.0
 
-        self.batch          = [[], [], [], [], [], []]
         self.batch_size     = 32
+
+        self.update_counter  = 0
+        self.update_interval = 32
 
         self.sess = tf.Session()
         self.sess.__enter__()
@@ -315,7 +315,11 @@ class TRPO:
         if len(self.experiences) > self.experiences_size:
             self.experiences.pop(0)
 
-        agent.train()
+        if self.update_counter > self.update_interval:
+            agent.train()
+            self.update_counter = 0;
+            
+        self.update_counter += 1
 
     def train(self):
 

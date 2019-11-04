@@ -164,7 +164,8 @@ class PPO:
 
         self.update_cnt = 0
 
-        self.batch_size     = 32
+        self.batch_size      = 32
+        self.update_interval = 32
 
         self.sess = tf.Session()
         self.sess.__enter__()
@@ -183,10 +184,10 @@ class PPO:
         if len(self.experiences) > self.experiences_size:
             self.experiences.pop(0)
 
-        if self.update_cnt >= 32:
+        if self.update_cnt >= self.update_interval:
             agent.train()
             self.update_cnt = 0
-            
+
         self.update_cnt += 1
 
     def train(self):
