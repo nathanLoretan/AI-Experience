@@ -18,7 +18,7 @@ class Model():
 
     def __init__(self, action_space, state_space):
 
-        self.alpha = 5e-3
+        self.alpha = 8e-3
         self.gamma = 0.99
         self.delta = 1e-3
         self.epoch = 10
@@ -318,7 +318,7 @@ class TRPO:
         if self.update_counter > self.update_interval:
             agent.train()
             self.update_counter = 0;
-            
+
         self.update_counter += 1
 
     def train(self):
