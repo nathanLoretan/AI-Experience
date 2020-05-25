@@ -1,140 +1,178 @@
+import click
+from collections import namedtuple
 import gym
-import logging
 import numpy as np
-import tensorflow as tf
-import matplotlib.pyplot as plt
-import tensorflow.keras.layers as kl
-import tensorflow.keras.losses as kls
-import tensorflow.keras.optimizers as ko
+import os
+import pickle
+import random
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
 
-class Model(tf.keras.Model):
-    def __init__(self, nbr_actions, nbr_inputs):
-        super().__init__('mlp_policy')
+PICKLE_FILE_PATH = "Carpole-DQN.torch"
 
-        self.hidden1_q  = kl.Dense(128, activation='relu', input_dim=(nbr_inputs))
-        self.q          = kl.Dense(nbr_actions)
+# if gpu is to be used
+device = ("cuda" if torch.cuda.is_available() else "cpu")
 
-    def call(self, inputs):
+class Model(nn.Module):
 
-        x = tf.convert_to_tensor(inputs)
+    HIDDEN_LAYER_SIZE = 128
 
-        hidden1_q = self.hidden1_q(x)
-        return self.q(hidden1_q)
+    def __init__(self, inputs, outputs):
+        super(Model, self).__init__()
 
-    def q_value(self, state):
+        self.h1 = nn.Linear(inputs, self.HIDDEN_LAYER_SIZE)
+        self.q = nn.Linear(self.HIDDEN_LAYER_SIZE, outputs)
 
-        q = self.predict(state)
-        return np.squeeze(q)
+    def forward(self, x):
+
+        x = F.relu(self.h1(x))
+        return self.q(x)
 
 class DQN:
 
-    def __init__(self, model):
+    ALPHA = 0.001
+    GAMMA = 0.99
+    EPSILON = 1.0
+    EPSILON_MIN = 0.01
+    EPSILON_DECAY = 0.995
+    BATCH_SIZE = 64
+    MEMORY_SIZE = 1000
 
-        self.experiences        = []
-        self.experiences_size   = 1000.0
+    experience = namedtuple('Experience', ('s', 's2', 'r', 'a', 'done'))
 
-        self.alpha          = 0.001
-        self.gamma          = 0.99
-        self.epsilon        = 1.0
-        self.epsilon_min    = 0.01
-        self.epsilon_decay  = 0.995
-        self.batch_size     = 32
+    def __init__(self, inputs, outputs):
 
-        self.model = model
-        self.model.compile(optimizer=ko.Adam(self.alpha), loss="MSE")
+        self.memory = []
+        self.epsilon = self.EPSILON
 
-    def get_action(self, state):
+        # Create the model that will run on GPU
+        self.model = Model(inputs, outputs).to(device)
+        self.optimizer = optim.RMSprop(self.model.parameters(), lr=self.ALPHA)
 
-        q = self.model.q_value(state)
+    def action(self, s):
+
+        with torch.no_grad():
+            q = self.model(torch.as_tensor(np.float32(s)).to(device)).cpu()
 
         # e-Greedy explore
         greedy = np.full(len(q), self.epsilon / (len(q)-1))
         greedy[np.argmax(q)] = 1.0 - self.epsilon
 
         # Get a random action
-        a = np.random.choice(len(q), 1, p=greedy.flatten())[0]
+        a = int(np.random.choice(len(q), 1, p=greedy.flatten())[0])
 
         # Decrease the exploration rate
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
+        if self.epsilon > self.EPSILON_MIN:
+            self.epsilon *= self.EPSILON_DECAY
         else:
-            self.epsilon = self.epsilon_min
+            self.epsilon = self.EPSILON_MIN
 
         return a
 
-    def store(self, experience):
+    def store(self, *args):
 
-        self.experiences.append(experience)
+        self.memory.append(self.experience(*args))
 
-        if len(self.experiences) > self.experiences_size:
-            self.experiences.pop(0)
+        if len(self.memory) > self.MEMORY_SIZE:
+            self.memory.pop(0)
 
     def train(self):
 
-        if len(self.experiences) < self.batch_size:
+        if len(self.memory) < self.BATCH_SIZE:
             return
 
-        batch  = []
-        states = []
+        samples = random.sample(self.memory, self.BATCH_SIZE)
+        batch = self.experience(*zip(*samples))
 
-        for i in range(self.batch_size):
+        states = torch.as_tensor(np.float32(batch.s), device=device)
+        next_states = torch.as_tensor(np.float32(batch.s2), device=device)
+        actions = torch.as_tensor(batch.a, device=device)
+        rewards = torch.as_tensor(batch.r, device=device)
+        done = torch.as_tensor(batch.done, device=device)
 
-            # Get experiances randomly
-            exp = int(np.random.uniform(0, len(self.experiences)))
-            s, s2, r, a, done = self.experiences[exp]
+        q = self.model(states)
+        q2 = self.model(next_states).detach()
+        qtarget = q.clone()
 
-            states.append(np.squeeze(s, axis=0))
+        for i in range(self.BATCH_SIZE):
 
-            q = self.model.q_value(s)
-
-            if done == True:
-                q[a] = r
+            if done[i]:
+                qtarget[i, actions[i]] = rewards[i]
             else:
-                q2 = self.model.q_value(s2)
-                q[a] = r + self.gamma * np.amax(q2)
+                qtarget[i, actions[i]] = rewards[i] + self.GAMMA * torch.max(q2[i])
 
-            batch.append(q)
+        loss = torch.nn.MSELoss()(q, qtarget)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
 
-        self.model.train_on_batch(np.array(states), np.array(batch))
+def play_agent(env, agent):
 
-if __name__ == '__main__':
+    results = []
+    episodes = 0
+    steps = 0
 
-    # Start OpenAI environment
-    env = gym.make('CartPole-v0')
+    while 1:
 
-    # Create an agent
-    model = Model(env.action_space.n, env.observation_space.shape)
-    agent = DQN(model)
+        s  = np.zeros(env.observation_space.shape[0])
+        s2 = np.zeros(env.observation_space.shape[0])
+
+        # Get state and convert it to tensor
+        s = env.reset()
+
+        steps = 0
+
+        while 1:
+
+            env.render()
+            a = agent.action(s)
+            s, r, done, _ = env.step(a)
+
+            steps += 1
+
+            if done:
+
+                episodes += 1
+
+                print("Episode", episodes,
+                      "finished after", steps)
+
+                break
+
+def train_agent(env, agent):
 
     episode = 0
     results = []
 
     while 1:
 
-        s  = np.zeros((1, env.observation_space.shape[0]))
-        s2 = np.zeros((1, env.observation_space.shape[0]))
+        s  = np.zeros(env.observation_space.shape[0])
+        s2 = np.zeros(env.observation_space.shape[0])
 
         steps = 0
 
-        s[0] = env.reset()
+        # Get state and convert it to tensor
+        s = env.reset()
 
         while 1:
 
-            # env.render()
+            a = agent.action(s)
+            s2, r, done, _ = env.step(a)
 
-            a = agent.get_action(s)
-            s2[0], r, done, _ = env.step(a)
+            agent.store(s, s2, r, a, done)
+            agent.train()
+
+            s = s2
 
             steps += 1
 
-            agent.store((s.copy(), s2.copy(), r, a, done))
-            agent.train()
-
-            s = s2.copy()
-
             if done:
 
-                # Calcul the score total over 100 episodes
+                # Calcul the score total over 100 episodes.
+                # The problem is considered sovled when a score
+                # of 195 is reached.
                 results.append(steps)
                 if len(results) > 100:
                     results.pop(0)
@@ -151,4 +189,42 @@ if __name__ == '__main__':
                       "finished after", steps,
                       "timesteps, score", score)
 
+                # Save the state of the agent
+                if episode % 100 == 0:
+                    torch.save(agent.model.state_dict(), PICKLE_FILE_PATH)
+
                 break
+
+def clean_agent():
+    os.remove(PICKLE_FILE_PATH)
+
+@click.command()
+@click.option('--play', flag_value='play', default=False)
+@click.option('--train', flag_value='train', default=True)
+@click.option('--clean', flag_value='clean', default=False)
+def run(play, train, clean):
+
+    if clean:
+        clean_agent()
+        exit()
+
+    # Start OpenAI environment
+    env = gym.make('CartPole-v0')
+
+    # Create an agent
+    agent = DQN(env.observation_space.shape[0], env.action_space.n)
+
+    try:
+        agent.model.load_state_dict(torch.load(PICKLE_FILE_PATH))
+        agent.model.eval()
+        print("Agent loaded!!!")
+    except:
+        print("Agent created!!!")
+
+    if play:
+        play_agent(env, agent)
+    elif train:
+        train_agent(env, agent)
+
+if __name__ == '__main__':
+    run()

@@ -1,189 +1,200 @@
+import click
+from collections import namedtuple
 import gym
 import numpy as np
-import tensorflow as tf
-import tensorflow.losses as tfl
-import matplotlib.pyplot as plt
-import tensorflow.keras.layers as kl
-import tensorflow.keras.losses as kls
-import tensorflow.keras.optimizers as ko
+import os
+import pickle
+import random
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.distributions import Categorical
 
-class Model(tf.keras.Model):
-    def __init__(self, nbr_actions, nbr_inputs):
-        super().__init__('mlp_policy')
+PICKLE_FILE_PATH = "Carpole-A2C.torch"
 
-        self.hidden1_v  = kl.Dense(128, activation='relu', input_dim=(nbr_inputs))
-        self.hidden1_pi = kl.Dense(128, activation='relu', input_dim=(nbr_inputs))
-        self.v          = kl.Dense(1)
-        self.pi         = kl.Dense(nbr_actions, activation="softmax")
+# if gpu is to be used
+device = ("cuda" if torch.cuda.is_available() else "cpu")
 
-    def call(self, inputs):
+class Actor(nn.Module):
 
-        x = tf.convert_to_tensor(inputs)
+    HIDDEN_LAYER_SIZE = 128
 
-        hidden1_v = self.hidden1_v(x)
-        v = self.v(hidden1_v)
+    def __init__(self, inputs, outputs):
+        super(Actor, self).__init__()
 
-        hidden1_pi = self.hidden1_pi(x)
-        pi = self.pi(hidden1_pi)
+        self.h1 =  nn.Linear(inputs, self.HIDDEN_LAYER_SIZE)
+        self.pi = nn.Linear(self.HIDDEN_LAYER_SIZE, outputs)
 
-        # pi == actor, v == critic
-        return pi, v
+    def forward(self, x):
 
-    def pi_v_value(self, state):
+        x = F.relu(self.h1(x))
+        return F.softmax(self.pi(x), dim=0)
 
-        # Return the policy and the value
-        pi, v = self.predict(state)
-        return np.squeeze(pi), v
+class Critic(nn.Module):
+
+    HIDDEN_LAYER_SIZE = 128
+
+    def __init__(self, inputs, outputs):
+        super(Critic, self).__init__()
+
+        self.h1 = nn.Linear(inputs, self.HIDDEN_LAYER_SIZE)
+        self.v = nn.Linear(self.HIDDEN_LAYER_SIZE, 1)
+
+    def forward(self, x):
+
+        x = F.relu(self.h1(x))
+        return self.v(x)
 
 class A2C:
 
-    def __init__(self, model):
+    ALPHA = 0.001
+    GAMMA = 0.99
+    ENTROPY = 0.0001
+    BATCH_SIZE = 32
+    MEMORY_SIZE = 1000.0
 
-        self.experiences        = []
-        self.experiences_size   = 1000.0
+    memory = []
+    experience = namedtuple('Experience', ('s', 's2', 'r', 'a', 'done'))
 
-        self.alpha          = 0.001
-        self.gamma          = 0.99
-        self.entropy_coef   = 0.0001
-        self.epsilon        = 1.0
-        self.epsilon_min    = 0.01
-        self.epsilon_decay  = 0.995
-        self.batch_size     = 32
+    def __init__(self, inputs, outputs):
 
-        self.model = model
-        self.model.compile(optimizer=ko.Adam(self.alpha),
-                           loss=[self.pi_loss, self.v_loss])
+        # Create the model that will run on GPU
+        self.actor = Actor(inputs, outputs).to(device)
+        self.critic = Critic(inputs, outputs).to(device)
 
-    def get_action(self, state):
+        self.optimizer_actor = optim.Adam(self.actor.parameters(), lr=self.ALPHA)
+        self.optimizer_critic = optim.Adam(self.critic.parameters(), lr=self.ALPHA)
 
-        pi, v = self.model.pi_v_value(state)
+    def action(self, s):
 
-        # e-Greedy explore
-        greedy = np.full(len(pi), self.epsilon / (len(pi)-1))
-        greedy[np.argmax(pi)] = 1.0 - self.epsilon
+        with torch.no_grad():
+            pi = self.actor(torch.as_tensor(np.float32(s)).to(device)).cpu()
 
         # Get a random action
-        a = np.random.choice(len(pi), 1, p=greedy.flatten())[0]
+        return int(np.random.choice(len(pi), 1, p=pi.numpy())[0])
 
-        # Decrease the exploration rate
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
-        else:
-            self.epsilon = self.epsilon_min
+    def store(self, *args):
 
-        return a
+        self.memory.append(self.experience(*args))
 
-    def store(self, experience):
-
-        self.experiences.append(experience)
-
-        # If no more memory for experiences, removes the first one
-        if len(self.experiences) > self.experiences_size:
-            self.experiences.pop(0)
+        # If no more memory for memory, removes the first one
+        if len(self.memory) > self.MEMORY_SIZE:
+            self.memory.pop(0)
 
     def train(self):
 
-        if len(self.experiences) < self.batch_size:
+        if len(self.memory) < self.BATCH_SIZE:
             return
 
-        actions = []
-        states  = []
+        samples = random.sample(self.memory, self.BATCH_SIZE)
+        batch = self.experience(*zip(*samples))
 
-        policy     = []
-        values     = []
-        q_values   = []
-        entropies  = []
-        advantages = []
+        states = torch.as_tensor(np.float32(batch.s), device=device)
+        next_states = torch.as_tensor(np.float32(batch.s2), device=device)
+        actions = torch.as_tensor(batch.a, device=device)
+        rewards = torch.as_tensor(batch.r, device=device)
+        done = torch.as_tensor(batch.done, device=device)
 
-        for i in range(self.batch_size):
+        pi = self.actor(states)
+        v = self.critic(states)
+        v2 = self.critic(next_states).detach()
 
-            # Get experiances randomly
-            exp = int(np.random.uniform(0, len(self.experiences)))
-            s, s2, r, a, done = self.experiences[exp]
+        adv = torch.zeros(self.BATCH_SIZE, device=device)
+        q = torch.zeros([self.BATCH_SIZE, 1], device=device)
+        log_probs = torch.zeros(self.BATCH_SIZE, device=device)
 
-            states.append(np.squeeze(s, axis=0))
-            actions.append(np.array(a))
+        entropy = 0
 
-            _, v = self.model.pi_v_value(s)
+        for i in range(self.BATCH_SIZE):
 
-            # Q = r + gamma * V
-            if done == True:
-                q = r
+            dist = Categorical(pi[i])
+            log_probs[i] = dist.log_prob(actions[i])
+            entropy += dist.entropy().mean()
+
+            if done[i]:
+                q[i][0] = rewards[i]
             else:
-                _, v2 = self.model.pi_v_value(s2)
-                q = r + self.gamma * v2[0, 0]
+                q[i][0] = rewards[i] + self.GAMMA * v2[i]
 
-            # Advantage = Q - V
-            adv = q - v[0, 0]
+            adv[i] = q[i][0] - v[i]
 
-            values.append(q)
-            advantages.append(adv)
+        loss_actor = -(log_probs * adv.detach()).mean() - self.ENTROPY * entropy
+        loss_critic = torch.nn.MSELoss()(v, q)
 
-        pi_loss_info = np.concatenate(
-            [np.array(actions)[:, None], np.array(advantages)[:, None]], axis=-1)
+        self.optimizer_actor.zero_grad()
+        loss_actor.backward()
+        self.optimizer_actor.step()
 
-        self.model.train_on_batch(
-            np.array(states), [np.array(pi_loss_info), np.array(values)])
+        self.optimizer_critic.zero_grad()
+        loss_critic.backward()
+        self.optimizer_critic.step()
 
-    def v_loss(self, true, value):
+def play_agent(env, agent):
 
-        # 1/2 * (R + gamma * V' - V)^2 where:
-        # V == predicition
-        # R + gamma * V' == true
-        return 0.5 * tfl.mean_squared_error(true, value)
-
-    def pi_loss(self, true, pi):
-
-        a, adv = tf.split(true, 2, axis=-1)
-
-        # Calculate the cross entropy
-        pi_loss = tfl.sparse_softmax_cross_entropy(tf.cast(a, tf.int32), pi, adv)
-
-        # Calculate the entropy of the policy, no need to multiply by the
-        # probability as softmax is used
-        entropy = tf.reduce_sum(tf.log(pi))
-
-        return pi_loss - self.entropy_coef * entropy
-
-if __name__ == '__main__':
-
-    # Start OpenAI environment
-    env = gym.make('CartPole-v0')
-
-    # Create an agent
-    model = Model(env.action_space.n, env.observation_space.shape)
-    agent = A2C(model)
-
+    results = []
     episodes = 0
-    results  = []
-
-    # Structure to store the state
-    s  = np.zeros((1, env.observation_space.shape[0]))
-    s2 = np.zeros((1, env.observation_space.shape[0]))
+    steps = 0
 
     while 1:
 
-        steps = 0
+        s  = np.zeros(env.observation_space.shape[0])
+        s2 = np.zeros(env.observation_space.shape[0])
 
-        s[0] = env.reset()
+        # Get state and convert it to tensor
+        s = env.reset()
+
+        steps = 0
 
         while 1:
 
-            # env.render()
-
-            a = agent.get_action(s)
-            s2[0], r, done, _ = env.step(a)
-
-            agent.store((s.copy(), s2.copy(), r, a, done))
-            agent.train()
-
-            s  = s2.copy()
+            env.render()
+            a = agent.action(s)
+            s, r, done, _ = env.step(a)
 
             steps += 1
 
             if done:
 
-                # Calcul the score total over 100 episodes
+                episodes += 1
+
+                print("Episode", episodes,
+                      "finished after", steps)
+
+                break
+
+def train_agent(env, agent):
+
+    episode = 0
+    results = []
+
+    while 1:
+
+        s  = np.zeros(env.observation_space.shape[0])
+        s2 = np.zeros(env.observation_space.shape[0])
+
+        steps = 0
+
+        # Get state and convert it to tensor
+        s = env.reset()
+
+        while 1:
+
+            a = agent.action(s)
+            s2, r, done, _ = env.step(a)
+
+            agent.store(s, s2, r, a, done)
+            agent.train()
+
+            s = s2
+
+            steps += 1
+
+            if done:
+
+                # Calcul the score total over 100 episodes.
+                # The problem is considered sovled when a score
+                # of 195 is reached.
                 results.append(steps)
                 if len(results) > 100:
                     results.pop(0)
@@ -194,10 +205,52 @@ if __name__ == '__main__':
                     print("Finished!!!")
                     exit()
 
-                episodes += 1
+                episode += 1
 
-                print("Episode", episodes,
+                print("Episode", episode,
                       "finished after", steps,
                       "timesteps, score", score)
 
+                # Save the state of the agent
+                if episode % 100 == 0:
+                    torch.save((agent.critic.state_dict(), agent.actor.state_dict()), PICKLE_FILE_PATH)
+
                 break
+
+def clean_agent():
+    os.remove(PICKLE_FILE_PATH)
+
+@click.command()
+@click.option('--play', flag_value='play', default=False)
+@click.option('--train', flag_value='train', default=True)
+@click.option('--clean', flag_value='clean', default=False)
+def run(play, train, clean):
+
+    if clean:
+        clean_agent()
+        exit()
+
+    # Start OpenAI environment
+    env = gym.make('CartPole-v0')
+
+    # Create an agent
+    agent = A2C(env.observation_space.shape[0], env.action_space.n)
+
+    try:
+        critic, actor = torch.load(PICKLE_FILE_PATH)
+
+        agent.critic.load_state_dict(critic)
+        agent.actor.load_state_dict(actor)
+        agent.critic.eval()
+        agent.actor.eval()
+        print("Agent loaded!!!")
+    except:
+        print("Agent created!!!")
+
+    if play:
+        play_agent(env, agent)
+    elif train:
+        train_agent(env, agent)
+
+if __name__ == '__main__':
+    run()
