@@ -11,10 +11,10 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
 
-PICKLE_FILE_PATH = "MoutainCar_DDQN.torch"
+SAVE_FILE_PATH = "MoutainCar_DDQN.torch"
 
-# if gpu is to be used
-device = ("cuda" if torch.cuda.is_available() else "cpu")
+# if gpu is used
+device = "cpu"#("cuda" if torch.cuda.is_available() else "cpu")
 
 class Model(nn.Module):
 
@@ -110,7 +110,6 @@ class DDQN:
                 qtarget[i, actions[i]] = rewards[i]
             else:
                 qtarget[i, actions[i]] = rewards[i] + self.GAMMA * torch.max(q2[i])
-                # qtarget[i, actions[i]] = rewards[i] + self.GAMMA * q2[i][actions[i]]
 
         loss = torch.nn.MSELoss()(q, qtarget)
         self.optimizer.zero_grad()
@@ -124,23 +123,18 @@ class DDQN:
 
 def play_agent(env, agent):
 
-    results = np.full(100, 200).tolist()
-    episodes = 0
+    episode = 0
     steps = 0
 
     while 1:
 
-        s  = np.zeros(env.observation_space.shape[0])
-        s2 = np.zeros(env.observation_space.shape[0])
-
-        # Get state and convert it to tensor
-        s = env.reset()
-
         steps = 0
+        s = env.reset()
 
         while 1:
 
             env.render()
+
             a = agent.action(s)
             s, _, done, _ = env.step(a)
 
@@ -148,9 +142,9 @@ def play_agent(env, agent):
 
             if done:
 
-                episodes += 1
+                episode += 1
 
-                print("Episode", episodes,
+                print("Episode", episode,
                       "finished after", steps)
 
                 break
@@ -162,17 +156,10 @@ def train_agent(env, agent):
 
     while 1:
 
-        s  = np.zeros(env.observation_space.shape[0])
-        s2 = np.zeros(env.observation_space.shape[0])
-
         steps = 0
-
-        # Get state and convert it to tensor
         s = env.reset()
 
         while 1:
-
-            env.render()
 
             a = agent.action(s)
             s2, r, done, _ = env.step(a)
@@ -198,8 +185,6 @@ def train_agent(env, agent):
             if done:
 
                 # Calcul the score total over 100 episodes.
-                # The problem is considered sovled when a score
-                # of 195 is reached.
                 results.append(steps)
                 if len(results) > 100:
                     results.pop(0)
@@ -208,6 +193,7 @@ def train_agent(env, agent):
 
                 if score < 170:
                     print("Finished!!!")
+                    torch.save(agent.policy.state_dict(), SAVE_FILE_PATH)
                     exit()
 
                 episode += 1
@@ -217,13 +203,13 @@ def train_agent(env, agent):
                       "timesteps, score", score)
 
                 # Save the state of the agent
-                if episode % 100 == 0:
-                    torch.save(agent.policy.state_dict(), PICKLE_FILE_PATH)
+                if episode % 20 == 0:
+                    torch.save(agent.policy.state_dict(), SAVE_FILE_PATH)
 
                 break
 
 def clean_agent():
-    os.remove(PICKLE_FILE_PATH)
+    os.remove(SAVE_FILE_PATH)
 
 @click.command()
 @click.option('--play', flag_value='play', default=False)
@@ -242,15 +228,15 @@ def run(play, train, clean):
     agent = DDQN(env.observation_space.shape[0], env.action_space.n)
 
     try:
-        agent.policy.load_state_dict(torch.load(PICKLE_FILE_PATH))
+        agent.policy.load_state_dict(torch.load(SAVE_FILE_PATH))
         agent.target.load_state_dict(self.policy.state_dict())
-        agent.policy.eval()
-        agent.target.eval()
         print("Agent loaded!!!")
     except:
         print("Agent created!!!")
 
     if play:
+        agent.policy.eval()
+        agent.target.eval()
         play_agent(env, agent)
     elif train:
         train_agent(env, agent)

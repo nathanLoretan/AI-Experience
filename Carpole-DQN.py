@@ -10,9 +10,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-PICKLE_FILE_PATH = "Carpole-DQN.torch"
+SAVE_FILE_PATH = "Carpole-DQN.torch"
 
-# if gpu is to be used
+# if gpu is used
 device = ("cuda" if torch.cuda.is_available() else "cpu")
 
 class Model(nn.Module):
@@ -116,13 +116,8 @@ def play_agent(env, agent):
 
     while 1:
 
-        s  = np.zeros(env.observation_space.shape[0])
-        s2 = np.zeros(env.observation_space.shape[0])
-
-        # Get state and convert it to tensor
-        s = env.reset()
-
         steps = 0
+        s = env.reset()
 
         while 1:
 
@@ -148,12 +143,7 @@ def train_agent(env, agent):
 
     while 1:
 
-        s  = np.zeros(env.observation_space.shape[0])
-        s2 = np.zeros(env.observation_space.shape[0])
-
         steps = 0
-
-        # Get state and convert it to tensor
         s = env.reset()
 
         while 1:
@@ -190,13 +180,13 @@ def train_agent(env, agent):
                       "timesteps, score", score)
 
                 # Save the state of the agent
-                if episode % 100 == 0:
-                    torch.save(agent.model.state_dict(), PICKLE_FILE_PATH)
+                if episode % 20 == 0:
+                    torch.save(agent.model.state_dict(), SAVE_FILE_PATH)
 
                 break
 
 def clean_agent():
-    os.remove(PICKLE_FILE_PATH)
+    os.remove(SAVE_FILE_PATH)
 
 @click.command()
 @click.option('--play', flag_value='play', default=False)
@@ -215,7 +205,7 @@ def run(play, train, clean):
     agent = DQN(env.observation_space.shape[0], env.action_space.n)
 
     try:
-        agent.model.load_state_dict(torch.load(PICKLE_FILE_PATH))
+        agent.model.load_state_dict(torch.load(SAVE_FILE_PATH))
         agent.model.eval()
         print("Agent loaded!!!")
     except:

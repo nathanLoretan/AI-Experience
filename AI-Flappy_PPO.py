@@ -1,6 +1,9 @@
+import gym
+import pygame
+import logging
+import threading
 import click
 from collections import namedtuple
-import gym
 import numpy as np
 import os
 import pickle
@@ -9,37 +12,35 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.distributions import Normal
+from torch.distributions import Categorical
+
+from copy import deepcopy, copy
+from ple import PLE
+from time import sleep
+from pygame.locals import *
+from math import sqrt, exp
+from random import randint
+from ple.games.flappybird import FlappyBird
 
 # References:
 # https://arxiv.org/abs/1707.06347
 
-SAVE_FILE_PATH = "Pendulum-PPO.torch"
+SAVE_FILE_PATH = "AI-Flappy-PPO.torch"
 
 class Actor(nn.Module):
 
     HIDDEN_LAYER_SIZE = 128
 
-    def __init__(self, inputs, outputs_range):
+    def __init__(self, inputs, outputs):
         super(Actor, self).__init__()
 
-        self.scale = torch.tensor((outputs_range[1] - outputs_range[0]) / 2.0)
-
-        self.h1_mean = nn.Linear(inputs, self.HIDDEN_LAYER_SIZE)
-        self.pi_mean = nn.Linear(self.HIDDEN_LAYER_SIZE, 1)
-
-        self.h1_std = nn.Linear(inputs, self.HIDDEN_LAYER_SIZE)
-        self.pi_std = nn.Linear(self.HIDDEN_LAYER_SIZE, 1)
+        self.h1 = nn.Linear(inputs, self.HIDDEN_LAYER_SIZE)
+        self.pi = nn.Linear(self.HIDDEN_LAYER_SIZE, outputs)
 
     def forward(self, x):
 
-        x_mean = F.relu(self.h1_mean(x))
-        mean = torch.tanh(self.pi_mean(x_mean)) * self.scale
-
-        x_std = F.relu(self.h1_std(x))
-        std = F.softplus(self.pi_std(x_std))
-
-        return mean, std
+        x = F.relu(self.h1(x))
+        return F.softmax(self.pi(x), dim=0)
 
 class Critic(nn.Module):
 
@@ -64,20 +65,18 @@ class PPO:
     ENTROPY = 1e-6
     VALUE = 1e-6
     EPOCH = 10
-    MEMORY_SIZE = 10000.0
+    MEMORY_SIZE = 1000
     BATCH_SIZE = 32
-    UPDATE = 1
+    UPDATE = 32
 
     experience = namedtuple('Experience', ('s', 's2', 'r', 'a', 'done', 'old_log_prob'))
 
     memory = []
     update = 0
 
-    def __init__(self, inputs, outputs_range):
+    def __init__(self, inputs, outputs):
 
-        self.outputs_range = [outputs_range[0][0], outputs_range[1][0]]
-
-        self.actor = Actor(inputs, outputs_range)
+        self.actor = Actor(inputs, outputs)
         self.critic = Critic(inputs)
 
         self.optimizer_actor = torch.optim.Adam(self.actor.parameters(), lr=self.ALPHA)
@@ -86,12 +85,12 @@ class PPO:
     def action(self, s):
 
         with torch.no_grad():
-            pi_mean, pi_std = self.actor(torch.as_tensor(s).float())
+            pi = self.actor(torch.as_tensor(np.float32(s)))
 
-        pi = Normal(pi_mean, pi_std)
-        a = pi.sample()
+        pi_dist = Categorical(pi)
+        a = pi_dist.sample()
 
-        return a.clamp(self.outputs_range[0], self.outputs_range[1]), pi.log_prob(a)
+        return a, pi_dist.log_prob(a)
 
     def store(self, *args):
 
@@ -126,29 +125,30 @@ class PPO:
         with torch.no_grad():
 
             v2 = self.critic(next_states).detach()
-            v = self.critic(states)
+            v = self.critic(states).detach()
 
-            # The terminal state is not considered as it doesn't change from
-            # the other state
             for i in range(self.BATCH_SIZE):
-                q[i] = rewards[i] + self.GAMMA * v2[i]
+                if done[i]:
+                    q[i] = rewards[i]
+                else:
+                    q[i] = rewards[i] + self.GAMMA * v2[i]
 
-            adv = (q - v)
+            adv = (q - v).detach()
 
         for i in range(self.EPOCH):
 
             surr = torch.zeros(self.BATCH_SIZE)
             entropy = torch.zeros(self.BATCH_SIZE)
 
-            pi_mean, pi_std = self.actor(states)
             v = self.critic(states)
+            pi = self.actor(states)
 
             for y in range(self.BATCH_SIZE):
 
-                pi = Normal(pi_mean[y], pi_std[y])
-                entropy[y] = pi.entropy()
+                pi_dist = Categorical(pi[y])
+                entropy[y] = pi_dist.entropy()
 
-                ratio = torch.exp(pi.log_prob(actions[y]) - (old_log_prob[y] + 1e-10))
+                ratio = torch.exp(pi_dist.log_prob(actions[y]) - (old_log_prob[y] + 1e-10))
                 clip = ratio.clamp(1.0 - self.EPSILON, 1.0 + self.EPSILON)
                 surr[y] = torch.min(ratio * adv[y], clip * adv[y])
 
@@ -168,21 +168,55 @@ class PPO:
             loss_actor.backward()
             self.optimizer_actor.step()
 
-def play_agent(env, agent):
+def normalize_state(obs):
+
+    s = np.zeros(8)
+
+    # Normalize
+    s[0] = obs["player_y"] / 390.0
+    s[1] = obs["player_vel"] / 10.0
+    s[2] = obs["next_pipe_dist_to_player"] / 309.0
+    s[3] = obs["next_pipe_top_y"] / 192.0
+    s[4] = obs["next_pipe_bottom_y"] / 292.0
+    s[5] = obs["next_next_pipe_dist_to_player"] / 453.0
+    s[6] = obs["next_next_pipe_top_y"] / 192.0
+    s[7] = obs["next_next_pipe_bottom_y"] / 292.0
+
+    return s
+
+def play_agent(flappy, env, agent):
 
     results = []
     episodes = 0
 
     while 1:
 
-        steps = 0
-        s = env.reset()
+        env.reset_game()
+
+        # Number of pipes passed as rewards
+        passed = 0
+
+        # Get initial state and normalize
+        s = normalize_state(flappy.getGameState())
 
         while 1:
 
-            env.render()
-            a, _ = agent.action(s)
-            s, r, done, _ = env.step(a)
+            a, log_prob = agent.action(s)
+            r = env.act(p.getActionSet()[a])
+
+            s = normalize_state(flappy.getGameState())
+
+            r += -0.1
+
+            if r > 0:
+                r = 5
+                passed += 1
+
+            # check if the game is over
+            if env.game_over():
+                done = True
+            else:
+                done = False
 
             steps += 1
 
@@ -191,29 +225,44 @@ def play_agent(env, agent):
                 episodes += 1
 
                 print("Episode", episodes,
-                      "finished after", steps)
+                      "finished after", passed)
 
                 break
 
-def train_agent(env, agent):
+def train_agent(flappy, env, agent):
 
-    episode = 0
-    results = np.full(100, -2000).tolist()
+    episodes = 0
+    results = []
 
     while 1:
 
-        rewards = 0
-        s = env.reset()
+        env.reset_game()
+
+        # Number of pipes passed as rewards
+        passed = 0
+
+        # Get initial state and normalize
+        s = normalize_state(flappy.getGameState())
 
         while 1:
 
             a, log_prob = agent.action(s)
-            s2, r, done, _ = env.step(a)
+            r = env.act(env.getActionSet()[a])
 
-            rewards += r
+            # r += -1
+            #
+            # The bird passed a pipe
+            if r > 0:
+                r = 5
+                passed += 1
 
-            # reward betweem -16.2736044 to 0
-            r = (r / 16.2736044) + 0.5
+            s2 = normalize_state(flappy.getGameState())
+
+            # check if the game is over
+            if env.game_over():
+                done = True
+            else:
+                done = False
 
             agent.store(s, s2, r, a, done, log_prob)
             agent.train()
@@ -223,25 +272,25 @@ def train_agent(env, agent):
             if done:
 
                 # Calcul the score total over 100 episodes
-                results.append(rewards)
+                results.append(passed)
                 if len(results) > 100:
                     results.pop(0)
 
                 score = np.sum(np.asarray(results)) / 100
 
-                if score >= -300:
+                if score >= 100:
                     print("Finished!!!")
                     torch.save((agent.critic.state_dict(), agent.actor.state_dict()), SAVE_FILE_PATH)
                     exit()
 
-                episode += 1
+                episodes += 1
 
-                print("Episode", episode,
-                      "rewards", rewards,
-                      "score", score)
+                print("Episode", episodes,
+                      "Number of pipes passed", passed,
+                      ", total score", score)
 
                 # Save the state of the agent
-                if episode % 20 == 0:
+                if episodes % 100 == 0:
                     torch.save((agent.critic.state_dict(), agent.actor.state_dict()), SAVE_FILE_PATH)
 
                 break
@@ -259,29 +308,33 @@ def run(play, train, clean):
         clean_agent()
         exit()
 
-    # Start OpenAI environment
-    env = gym.make('Pendulum-v0')
+    # Start environment
+    flappy = FlappyBird()
+
+    if play:
+        env = PLE(flappy, fps=30, display_screen=True, force_fps=False)
+    else:
+        env = PLE(flappy, fps=30, display_screen=False, force_fps=False)
+    env.init()
 
     # Create an agent
-    agent = PPO(
-        env.observation_space.shape[0], [env.action_space.low, env.action_space.high])
+    agent = PPO(len(flappy.getGameState()), len(env.getActionSet()))
 
     try:
         critic, actor = torch.load(SAVE_FILE_PATH)
+
         agent.critic.load_state_dict(critic)
         agent.actor.load_state_dict(actor)
-
+        agent.critic.eval()
+        agent.actor.eval()
         print("Agent loaded!!!")
     except:
         print("Agent created!!!")
 
     if play:
-        agent.critic.eval()
-        agent.actor.eval()
-        play_agent(env, agent)
+        play_agent(flappy, env, agent)
     elif train:
-        train_agent(env, agent)
-
+        train_agent(flappy, env, agent)
 
 if __name__ == '__main__':
     run()

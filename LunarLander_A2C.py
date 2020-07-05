@@ -11,10 +11,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
 
-SAVE_FILE_PATH = "Carpole-A2C.torch"
-
-# if gpu is used
-device = ("cuda" if torch.cuda.is_available() else "cpu")
+SAVE_FILE_PATH = "LunarLander-A2C.torch"
 
 class Actor(nn.Module):
 
@@ -24,11 +21,13 @@ class Actor(nn.Module):
         super(Actor, self).__init__()
 
         self.h1 =  nn.Linear(inputs, self.HIDDEN_LAYER_SIZE)
+        self.h2 =  nn.Linear(self.HIDDEN_LAYER_SIZE, self.HIDDEN_LAYER_SIZE)
         self.pi = nn.Linear(self.HIDDEN_LAYER_SIZE, outputs)
 
     def forward(self, x):
 
         x = F.relu(self.h1(x))
+        x = F.relu(self.h2(x))
         return F.softmax(self.pi(x), dim=0)
 
 class Critic(nn.Module):
@@ -38,30 +37,34 @@ class Critic(nn.Module):
     def __init__(self, inputs):
         super(Critic, self).__init__()
 
-        self.h1 = nn.Linear(inputs, self.HIDDEN_LAYER_SIZE)
+        self.h1 =  nn.Linear(inputs, self.HIDDEN_LAYER_SIZE)
+        self.h2 =  nn.Linear(self.HIDDEN_LAYER_SIZE, self.HIDDEN_LAYER_SIZE)
         self.v = nn.Linear(self.HIDDEN_LAYER_SIZE, 1)
 
     def forward(self, x):
 
         x = F.relu(self.h1(x))
+        x = F.relu(self.h2(x))
         return self.v(x)
 
 class A2C:
 
-    ALPHA = 0.001
+    ALPHA = 0.0001
     GAMMA = 0.99
-    ENTROPY = 0.0001
-    BATCH_SIZE = 32
-    MEMORY_SIZE = 1000.0
+    BATCH_SIZE = 64
+    MEMORY_SIZE = 10000.0
+    UPDATE = 1
+
+    experience = namedtuple('Experience', ('s', 's2', 'r', 'a', 'done'))
 
     memory = []
-    experience = namedtuple('Experience', ('s', 's2', 'r', 'a', 'done'))
+    update = 0
 
     def __init__(self, inputs, outputs):
 
         # Create the model that will run on GPU
-        self.actor = Actor(inputs, outputs).to(device)
-        self.critic = Critic(inputs).to(device)
+        self.actor = Actor(inputs, outputs)
+        self.critic = Critic(inputs)
 
         self.optimizer_actor = optim.Adam(self.actor.parameters(), lr=self.ALPHA)
         self.optimizer_critic = optim.Adam(self.critic.parameters(), lr=self.ALPHA)
@@ -69,7 +72,7 @@ class A2C:
     def action(self, s):
 
         with torch.no_grad():
-            pi = self.actor(torch.as_tensor(np.float32(s)).to(device)).cpu()
+            pi = self.actor(torch.as_tensor(np.float32(s))).cpu()
 
         # Get a random action
         return int(np.random.choice(len(pi), 1, p=pi.numpy())[0])
@@ -87,22 +90,28 @@ class A2C:
         if len(self.memory) < self.BATCH_SIZE:
             return
 
+        self.update += 1
+
+        # Train the network each UPDATE episode
+        if self.update % self.UPDATE != 0:
+            return
+
         samples = random.sample(self.memory, self.BATCH_SIZE)
         batch = self.experience(*zip(*samples))
 
-        states = torch.as_tensor(np.float32(batch.s), device=device)
-        next_states = torch.as_tensor(np.float32(batch.s2), device=device)
-        actions = torch.as_tensor(batch.a, device=device)
-        rewards = torch.as_tensor(batch.r, device=device)
-        done = torch.as_tensor(batch.done, device=device)
+        states = torch.as_tensor(np.float32(batch.s))
+        next_states = torch.as_tensor(np.float32(batch.s2))
+        actions = torch.as_tensor(batch.a)
+        rewards = torch.as_tensor(batch.r)
+        done = torch.as_tensor(batch.done)
 
         pi = self.actor(states)
         v = self.critic(states)
         v2 = self.critic(next_states).detach()
 
-        adv = torch.zeros(self.BATCH_SIZE, device=device)
-        q = torch.zeros([self.BATCH_SIZE, 1], device=device)
-        log_probs = torch.zeros(self.BATCH_SIZE, device=device)
+        adv = torch.zeros(self.BATCH_SIZE)
+        q = torch.zeros([self.BATCH_SIZE, 1])
+        log_probs = torch.zeros(self.BATCH_SIZE)
 
         entropy = 0
 
@@ -110,7 +119,6 @@ class A2C:
 
             dist = Categorical(pi[i])
             log_probs[i] = dist.log_prob(actions[i])
-            entropy += dist.entropy().mean()
 
             if done[i]:
                 q[i][0] = rewards[i]
@@ -119,7 +127,7 @@ class A2C:
 
             adv[i] = q[i][0] - v[i]
 
-        loss_actor = -(log_probs * adv.detach()).mean() - self.ENTROPY * entropy
+        loss_actor = - (log_probs * adv.detach()).mean()
         loss_critic = torch.nn.MSELoss()(v, q)
 
         self.optimizer_actor.zero_grad()
@@ -137,23 +145,24 @@ def play_agent(env, agent):
 
     while 1:
 
-        steps = 0
+        rewards = 0
         s = env.reset()
 
         while 1:
 
             env.render()
+
             a = agent.action(s)
             s, r, done, _ = env.step(a)
 
-            steps += 1
+            rewards += r
 
             if done:
 
                 episodes += 1
 
                 print("Episode", episodes,
-                      "finished after", steps)
+                      "finished after", rewards)
 
                 break
 
@@ -164,7 +173,7 @@ def train_agent(env, agent):
 
     while 1:
 
-        steps = 0
+        rewards = 0
         s = env.reset()
 
         while 1:
@@ -172,34 +181,31 @@ def train_agent(env, agent):
             a = agent.action(s)
             s2, r, done, _ = env.step(a)
 
+            rewards += r
+
             agent.store(s, s2, r, a, done)
             agent.train()
 
             s = s2
 
-            steps += 1
-
             if done:
 
-                # Calcul the score total over 100 episodes.
-                # The problem is considered sovled when a score
-                # of 195 is reached.
-                results.append(steps)
-                if len(results) > 100:
+                # Calcul the score total over 100 episodes
+                results.append(rewards)
+                if len(results) > 150:
                     results.pop(0)
 
                 score = np.sum(np.asarray(results)) / 100
 
-                if score >= 195:
+                if score >= 200:
                     print("Finished!!!")
-                    torch.save((agent.critic.state_dict(), agent.actor.state_dict()), SAVE_FILE_PATH)
                     exit()
 
                 episode += 1
 
                 print("Episode", episode,
-                      "finished after", steps,
-                      "timesteps, score", score)
+                      "rewards", rewards,
+                      "score", score)
 
                 # Save the state of the agent
                 if episode % 20 == 0:
@@ -221,23 +227,22 @@ def run(play, train, clean):
         exit()
 
     # Start OpenAI environment
-    env = gym.make('CartPole-v0')
+    env = gym.make('LunarLander-v2')
 
     # Create an agent
     agent = A2C(env.observation_space.shape[0], env.action_space.n)
 
     try:
         critic, actor = torch.load(SAVE_FILE_PATH)
-
         agent.critic.load_state_dict(critic)
         agent.actor.load_state_dict(actor)
-        agent.critic.eval()
-        agent.actor.eval()
         print("Agent loaded!!!")
     except:
         print("Agent created!!!")
 
     if play:
+        agent.critic.eval()
+        agent.actor.eval()
         play_agent(env, agent)
     elif train:
         train_agent(env, agent)
