@@ -154,7 +154,7 @@ class TP3:
 
             next_pi_actions = torch.zeros([self.outputs, self.BATCH_SIZE, 1], device=device)
 
-            next_pi = self.pi_target(torch.as_tensor(next_states).float())
+            next_pi = self.pi_target(next_states)
 
             noise = torch.FloatTensor(batch.a).data.normal_(0, self.NOISE_MIN).to(device)
             noise = noise.clamp(-self.NOISE_CLIP, self.NOISE_CLIP)
@@ -192,7 +192,7 @@ class TP3:
         if self.update % 2 == 0:
             return
 
-        pi = self.pi(torch.as_tensor(states).float())
+        pi = self.pi(states)
 
         pi_actions = torch.zeros([self.outputs, self.BATCH_SIZE, 1], device=device)
 

@@ -18,103 +18,70 @@ device = ("cuda" if torch.cuda.is_available() else "cpu")
 
 class Policy(nn.Module):
 
-    # (96 - f + 2 * p) / s + 1 = number of neurones along each row
+    HIDDEN_LAYER_SIZE_1 = 512
+    HIDDEN_LAYER_SIZE_2 = 256
 
-    HIDDEN_LAYER_SIZE = 128
-
-    def __init__(self, inputs, outputs):
+    def __init__(self, inputs2D, outputs):
         super(Policy, self).__init__()
 
-        self.h1 = nn.Conv2d(3, 32, kernel_size=5, stride=1, padding=2)
-        self.relu1 = nn.ReLU()
-        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.inputs1D = inputs2D[0] * inputs2D[1]
 
-        self.h2 = nn.Conv2d(32, 64, kernel_size=5, stride=1, padding=2)
-        self.relu2 = nn.ReLU()
-        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        self.pi = nn.Linear(24 * 24 * 64, outputs)
-        self.tanh = nn.Tanh()
+        self.h1 = nn.Linear(self.inputs1D, self.HIDDEN_LAYER_SIZE_1)
+        self.h2 = nn.Linear(self.HIDDEN_LAYER_SIZE_1, self.HIDDEN_LAYER_SIZE_2)
+        self.pi = nn.Linear(self.HIDDEN_LAYER_SIZE_2, outputs)
 
     def forward(self, x):
 
-        x = self.h1(x)
-        x = self.relu1(x)
-        x = self.pool1(x)
+        x = x.view(-1, self.inputs1D)
 
-        x = self.h2(x)
-        x = self.relu2(x)
-        x = self.pool2(x)
-
-        x = x.view(-1, 24 * 24 * 64)
-
-        return self.tanh(self.pi(x))
+        x = F.relu(self.h1(x))
+        x = F.relu(self.h2(x))
+        return torch.tanh(self.pi(x))
 
 class Q(nn.Module):
 
-    HIDDEN_LAYER_SIZE = 128
+    HIDDEN_LAYER_SIZE_1 = 512
+    HIDDEN_LAYER_SIZE_2 = 256
 
-    def __init__(self, inputs, actions):
+    def __init__(self, inputs2D, actions):
         super(Q, self).__init__()
 
-        # (w - f + 2 * p) / s + 1 = number of neurones along each row
-
+        self.inputs1D = inputs2D[0] * inputs2D[1]
         self.actions = actions
 
-        self.h1 = nn.Conv2d(3, 32, kernel_size=5, stride=1, padding=2)
-        self.relu1 = nn.ReLU()
-        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        self.h2 = nn.Conv2d(32, 64, kernel_size=5, stride=1, padding=2)
-        self.relu2 = nn.ReLU()
-        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        self.q = nn.Linear(24 * 24 * 64 + actions, 1)
-
-        # self.h1 = nn.Linear(inputs, self.HIDDEN_LAYER_SIZE_1)
-        # self.norm1 = nn.LayerNorm(self.HIDDEN_LAYER_SIZE_1)
-        # self.relu1 = nn.ReLU()
-        #
-        # self.h2 = nn.Linear(self.HIDDEN_LAYER_SIZE_1 + actions, self.HIDDEN_LAYER_SIZE_2)
-        # self.norm2 = nn.LayerNorm(self.HIDDEN_LAYER_SIZE_2)
-        # self.relu2 = nn.ReLU()
-        #
-        # self.q = nn.Linear(self.HIDDEN_LAYER_SIZE_2, 1)
+        self.h1 = nn.Linear(self.inputs1D + actions, self.HIDDEN_LAYER_SIZE_1)
+        self.h2 = nn.Linear(self.HIDDEN_LAYER_SIZE_1, self.HIDDEN_LAYER_SIZE_2)
+        self.q = nn.Linear(self.HIDDEN_LAYER_SIZE_2, 1)
 
     def forward(self, x, a):
 
-        x = self.h1(x)
-        x = self.relu1(x)
-        x = self.pool1(x)
-
-        x = self.h2(x)
-        x = self.relu2(x)
-        x = self.pool2(x)
-
-        x = x.view(-1, 24 * 24 * 64)
+        x = x.view(-1, self.inputs1D)
 
         for i in range(self.actions):
             x = torch.cat((x, a[i]), 1)
 
+        x = F.relu(self.h1(x))
+        x = F.relu(self.h2(x))
         return self.q(x)
 
 class SAC:
 
-    LR = 1e-4
+    LR = 1e-3
     GAMMA = 0.99
-    POLYAK = 1e-3
-    ALPHA = 2e-2
-    NOISE_DECAY = 1e-5
+    POLYAK = 5e-3
+    ALPHA = 2e-1
+    NOISE_DECAY = 1e-6
     NOISE_MIN = 0.2
+    NOISE_START = 1.0
     BATCH_SIZE = 64
+    UPDATE_INTERVAL = 50
     MEMORY_SIZE = 10000.0
-    UPDATE = 1
 
     experience = namedtuple('Experience', ('s', 's2', 'r', 'a', 'done'))
 
     memory = []
     update = 0
-    noise = 1.0
+    noise = NOISE_START
 
     def __init__(self, inputs, outputs):
 
@@ -169,6 +136,12 @@ class SAC:
         if len(self.memory) < self.BATCH_SIZE:
             return
 
+        if self.update < self.UPDATE_INTERVAL:
+            self.update += 1
+            return
+
+        self.update = 0
+
         samples = random.sample(self.memory, self.BATCH_SIZE)
         batch = self.experience(*zip(*samples))
 
@@ -188,13 +161,11 @@ class SAC:
 
         with torch.no_grad():
 
-            next_pi = self.pi(torch.as_tensor(next_states).float())
-            next_pi_dist = Normal(next_pi, self.NOISE_MIN)
-            next_pi_logprob = next_pi_dist.log_prob(next_pi).sum(axis=1)
-
+            next_pi = self.pi(next_states)
+            next_pi_dist = Normal(next_pi, 1e-8)
+            next_pi_logprob = next_pi_dist.log_prob(next_pi).sum(-1, keepdim=True)
             next_pi_actions = torch.zeros([self.outputs, self.BATCH_SIZE, 1], device=device)
 
-            # Target Policy Smoothing
             for i in range(self.BATCH_SIZE):
                 for j in range(self.outputs):
                     next_pi_actions[j][i] = next_pi[i][j].clamp(-1.0, 1.0)
@@ -222,14 +193,8 @@ class SAC:
         q2_loss.backward()
         self.optimizer_q2.step()
 
-        # Delayed Policy Updates
-        self.update += 1
-        if self.update % 2 == 0:
-            return
-
-        pi = self.pi(torch.as_tensor(states).float())
-        pi_dist = Normal(next_pi, self.NOISE_MIN)
-
+        pi = self.pi(states)
+        pi_dist = Normal(pi, 1e-8)
         pi_actions = torch.zeros([self.outputs, self.BATCH_SIZE, 1], device=device)
 
         for i in range(self.BATCH_SIZE):
@@ -267,12 +232,18 @@ def play_agent(env, agent):
         rewards = 0
         s = env.reset()
 
+        # Convert image to greyscale
+        s = np.dot(s[...,:3], [0.299, 0.587, 0.144])
+
         while 1:
 
             env.render()
 
-            a = agent.action( np.expand_dims(s, 1))
+            a = agent.action(np.expand_dims(s, 0), True)
             s, r, done, _ = env.step(a)
+
+            # Convert image to greyscale
+            s = np.dot(s[...,:3], [0.299, 0.587, 0.144])
 
             rewards += r
 
@@ -294,18 +265,19 @@ def train_agent(env, agent):
 
         rewards = 0
         s = env.reset()
-        s = s.reshape(3,96,96)
+
+        # Convert image to greyscale
+        s = np.dot(s[...,:3], [0.299, 0.587, 0.144])
 
         while 1:
-
-            env.render()
 
             a = agent.action(np.expand_dims(s, 0), True)
             s2, r, done, _ = env.step(a)
 
-            rewards += r
+            # Convert image to greyscale
+            s2 = np.dot(s2[...,:3], [0.299, 0.587, 0.144])
 
-            s2 = s2.reshape(3,96,96)
+            rewards += r
 
             agent.store(s, s2, r, a, done)
             agent.train()
@@ -327,8 +299,7 @@ def train_agent(env, agent):
                         agent.q1_target.state_dict(), \
                         agent.q2.state_dict(), \
                         agent.q2_target.state_dict(), \
-                        agent.pi.state_dict(), \
-                        agent.pi_target.state_dict()), SAVE_FILE_PATH)
+                        agent.pi.state_dict()), SAVE_FILE_PATH)
                     print("Finished!!!")
                     exit()
 
@@ -345,8 +316,7 @@ def train_agent(env, agent):
                         agent.q1_target.state_dict(), \
                         agent.q2.state_dict(), \
                         agent.q2_target.state_dict(), \
-                        agent.pi.state_dict(), \
-                        agent.pi_target.state_dict()), SAVE_FILE_PATH)
+                        agent.pi.state_dict()), SAVE_FILE_PATH)
 
                 break
 
@@ -363,12 +333,12 @@ def run(play, train, clean):
         clean_agent()
         exit()
 
-
     # Start OpenAI environment
     env = gym.make('CarRacing-v0')
 
-    # Create an agent, [96x96x3, 3]
-    agent = SAC(env.observation_space.shape, env.action_space.shape[0])
+    # Create an agent
+    agent = SAC([env.observation_space.shape[0],
+        env.observation_space.shape[1]], env.action_space.shape[0])
 
     try:
         q1, q1_target, q2, q2_target, pi, pi_target = torch.load(SAVE_FILE_PATH)
@@ -377,7 +347,6 @@ def run(play, train, clean):
         agent.q2.load_state_dict(q2)
         agent.q2_target.load_state_dict(q2_target)
         agent.pi.load_state_dict(pi)
-        agent.pi_target.load_state_dict(pi_target)
         print("Agent loaded!!!")
     except:
         print("Agent created!!!")
